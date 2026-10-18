@@ -1,0 +1,13 @@
+.env
+.env.template
+.git
+.gitignore
+.dockerignore
+.github
+.pre-commit-config.yaml
+tests/
+*.md
+!README.md
+__pycache__/
+*.pyc
+.venv/

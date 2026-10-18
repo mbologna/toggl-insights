@@ -1,0 +1,1755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Toggl Insights</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js"
+          integrity="sha512-WoViKhKD4qI2WruSZqv9+kvM4WfFhUMQCLN4QlDTt5aU56fLQy2gYoxWIqlEnXqJy/+Ac5q/hk1oWfqnMDhwMA=="
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0f1117;
+      color: #e0e0e0;
+      min-height: 100vh;
+    }
+
+    header {
+      padding: 1.5rem 2rem;
+      border-bottom: 1px solid #1e2130;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+
+    header h1 { font-size: 1.4rem; font-weight: 600; color: #fff; letter-spacing: -0.01em; }
+
+    .header-right { display: flex; align-items: center; gap: 1rem; }
+
+    .refresh-btn {
+      background: #1e2130; border: 1px solid #2e3350; color: #a0a8c0;
+      padding: 0.45rem 1rem; border-radius: 6px; cursor: pointer;
+      font-size: 0.85rem; transition: background 0.15s, color 0.15s;
+    }
+    .refresh-btn:hover { background: #262b42; color: #fff; }
+    .refresh-btn:disabled { opacity: 0.5; cursor: default; }
+    .last-refreshed { font-size: 0.78rem; color: #60677f; }
+
+    main { max-width: 1100px; margin: 2rem auto; padding: 0 1.5rem; }
+
+    /* Filter row */
+    .filter-row {
+      display: flex; align-items: center; gap: 0.6rem;
+      margin-bottom: 1.25rem; flex-wrap: wrap;
+    }
+    .filter-label { font-size: 0.85rem; color: #60677f; }
+    .filter-sep { font-size: 0.85rem; color: #60677f; }
+    .filter-row input[type="date"] {
+      background: #1e2130; border: 1px solid #2e3350; color: #e0e0e0;
+      padding: 0.4rem 0.65rem; border-radius: 6px; font-size: 0.85rem;
+      cursor: pointer; outline: none;
+      color-scheme: dark;
+    }
+    .filter-row input[type="date"]:hover { border-color: #4A90D9; }
+    .filter-row input[type="date"]:focus { border-color: #4A90D9; }
+
+    .tabs {
+      display: flex; gap: 0.25rem;
+      border-bottom: 1px solid #1e2130; margin-bottom: 1.5rem;
+    }
+
+    .tab-btn {
+      background: none; border: none; border-bottom: 2px solid transparent;
+      color: #60677f; padding: 0.65rem 1.25rem; cursor: pointer;
+      font-size: 0.9rem; font-weight: 500;
+      transition: color 0.15s, border-color 0.15s; margin-bottom: -1px;
+    }
+    .tab-btn:hover { color: #a0a8c0; }
+    .tab-btn.active { color: #4A90D9; border-bottom-color: #4A90D9; }
+
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    .chart-card {
+      background: #161820; border: 1px solid #1e2130;
+      border-radius: 10px; padding: 1.5rem; margin-bottom: 1.25rem;
+    }
+
+    .chart-wrapper { position: relative; height: 340px; }
+    @media (max-width: 600px) { .chart-wrapper { height: 240px; } }
+
+    .legend {
+      display: flex; gap: 1rem; margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
+    .legend-item {
+      display: flex; align-items: center; gap: 0.4rem;
+      font-size: 0.82rem; color: #a0a8c0; cursor: pointer;
+      padding: 0.2rem 0.5rem; border-radius: 4px; transition: background 0.12s;
+    }
+    .legend-item:hover { background: #1e2130; }
+    .legend-item.hidden { opacity: 0.35; }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+
+    .stats-row { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.5rem; }
+
+    .stat-card {
+      flex: 1 1 160px;
+      background: #1a1d2b; border: 1px solid #1e2130;
+      border-radius: 8px; padding: 0.9rem 1.1rem;
+    }
+    .stat-card .label {
+      font-size: 0.75rem; text-transform: uppercase;
+      letter-spacing: 0.05em; color: #60677f; margin-bottom: 0.35rem;
+    }
+    .stat-card .value { font-size: 1.5rem; font-weight: 600; line-height: 1; }
+    .stat-card .deviation { font-size: 0.8rem; margin-top: 0.3rem; color: #60677f; }
+
+    .up   { color: #27AE60; }
+    .down { color: #e05555; }
+
+    .error-msg {
+      color: #e05555; background: #1f1218;
+      border: 1px solid #3a1a1a; border-radius: 8px;
+      padding: 1rem 1.25rem; font-size: 0.9rem;
+    }
+
+    /* Progress bar for weekly targets */
+    .target-row {
+      margin-top: 0.5rem; font-size: 0.75rem; color: #60677f;
+    }
+    .target-label { margin-bottom: 0.25rem; }
+    .progress-track {
+      height: 4px; border-radius: 2px;
+      background: #2e3350; overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%; border-radius: 2px;
+      transition: width 0.3s ease;
+    }
+
+    /* Donut card */
+    .donut-card {
+      background: #161820; border: 1px solid #1e2130;
+      border-radius: 10px; padding: 1.5rem; margin-bottom: 1.25rem;
+    }
+    .donut-card h3 {
+      font-size: 0.85rem; color: #60677f; margin-bottom: 1rem;
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .donut-wrapper { position: relative; height: 260px; }
+
+    /* Heatmap */
+    #hm-tooltip {
+      position: fixed; pointer-events: none;
+      background: #1a1d2b; border: 1px solid #2e3350;
+      border-radius: 6px; padding: 0.4rem 0.7rem;
+      font-size: 0.8rem; color: #e0e0e0;
+      display: none; z-index: 100;
+      white-space: nowrap;
+    }
+
+    .heatmap-scroll { overflow-x: auto; }
+    .heatmap-grid {
+      display: inline-flex; flex-direction: row;
+      gap: 3px; align-items: flex-start;
+    }
+    .hm-labels-col {
+      display: flex; flex-direction: column;
+      gap: 3px; padding-top: 22px; /* offset for month row */
+      margin-right: 4px;
+    }
+    .hm-day-label {
+      height: 13px; font-size: 0.68rem; color: #60677f;
+      line-height: 13px; text-align: right; width: 14px;
+    }
+    .hm-week-col { display: flex; flex-direction: column; gap: 3px; }
+    .hm-month-label {
+      height: 18px; font-size: 0.7rem; color: #60677f;
+      white-space: nowrap; line-height: 18px;
+    }
+    .hm-cell {
+      width: 13px; height: 13px; border-radius: 2px;
+      cursor: pointer;
+    }
+
+    /* Auto-refresh select */
+    select.refresh-btn {
+      appearance: none; -webkit-appearance: none;
+      padding-right: 0.65rem;
+    }
+
+    /* Compare button active state */
+    .btn-active {
+      border-color: #4A90D9 !important;
+      color: #4A90D9 !important;
+    }
+
+    /* Hour-of-day grid */
+    .hour-grid-wrap { overflow-x: auto; }
+    .hour-grid {
+      display: grid;
+      grid-template-columns: 28px repeat(24, minmax(14px, 1fr));
+      gap: 2px;
+      min-width: 420px;
+    }
+    .hour-day-label {
+      font-size: 0.68rem; color: #60677f;
+      display: flex; align-items: center; padding-right: 4px;
+      white-space: nowrap;
+    }
+    .hour-col-label {
+      font-size: 0.65rem; color: #60677f; text-align: center;
+    }
+    .hour-cell {
+      aspect-ratio: 1; border-radius: 2px; cursor: default;
+    }
+    .chart-card-title {
+      font-size: 0.85rem; color: #60677f; margin-bottom: 1rem;
+      text-transform: uppercase; letter-spacing: 0.05em;
+    }
+
+    /* Mobile layout */
+    @media (max-width: 640px) {
+      header { padding: 1rem; }
+      header h1 { font-size: 1.1rem; }
+      .header-right { gap: 0.5rem; flex-wrap: wrap; }
+      .last-refreshed { font-size: 0.72rem; }
+
+      main { padding: 0 0.75rem; margin: 1rem auto; }
+
+      /* Scrollable tabs on small screens */
+      .tabs {
+        overflow-x: auto; flex-wrap: nowrap;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+      }
+      .tabs::-webkit-scrollbar { display: none; }
+      .tab-btn { padding: 0.55rem 0.85rem; font-size: 0.82rem; white-space: nowrap; }
+
+      /* Filter row stacks vertically */
+      .filter-row { flex-direction: column; align-items: flex-start; gap: 0.4rem; }
+
+      /* Overview stat cards fill width on mobile */
+      .stat-card { flex: 1 1 140px; }
+      .stat-card .value { font-size: 1.25rem; }
+
+      /* Chart height reduction handled by existing 600px breakpoint */
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Toggl Insights</h1>
+    <div class="header-right">
+      <span class="last-refreshed" id="countdown"></span>
+      <span class="last-refreshed" id="lastRefreshed">Loading…</span>
+      <select class="refresh-btn" id="autoRefreshSelect" onchange="setAutoRefresh(+this.value)">
+        <option value="0">Auto: Off</option>
+        <option value="15">Auto: 15m</option>
+        <option value="30">Auto: 30m</option>
+        <option value="60">Auto: 60m</option>
+      </select>
+      <button class="refresh-btn" id="refreshBtn" onclick="loadData()">Refresh</button>
+      <button class="refresh-btn" id="settingsBtn" onclick="openSettings()" title="Weekly targets">⚙</button>
+    </div>
+  </header>
+
+  <!-- Weekly targets settings panel -->
+  <div id="settings-overlay" onclick="if(event.target===this)closeSettings()"
+       style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:200;
+              align-items:center;justify-content:center">
+    <div style="background:#1a1d2b;border:1px solid #2e3350;border-radius:10px;
+                padding:1.5rem;min-width:300px;max-width:420px;width:90%">
+      <h3 style="color:#fff;margin-bottom:0.25rem;font-size:1rem;font-weight:600">Weekly Targets</h3>
+      <p style="font-size:0.78rem;color:#60677f;margin-bottom:1rem">
+        Hours per project per week. Saved locally in the browser.
+        Server-configured values (via env var) take precedence.
+      </p>
+      <div id="settings-targets"></div>
+      <div style="display:flex;gap:0.5rem;margin-top:1.25rem;justify-content:flex-end">
+        <button class="refresh-btn" onclick="closeSettings()">Cancel</button>
+        <button class="refresh-btn" onclick="saveSettings()"
+                style="background:#4A90D9;color:#fff;border-color:#4A90D9">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <main>
+    <div class="filter-row">
+      <span class="filter-label">Filter:</span>
+      <input type="date" id="filter-start" onchange="applyFilter()">
+      <span class="filter-sep">→</span>
+      <input type="date" id="filter-end" onchange="applyFilter()">
+      <button class="refresh-btn" onclick="clearFilter()">Clear</button>
+      <button class="refresh-btn" id="compareBtn" onclick="toggleComparison()">Compare prev</button>
+      <label class="filter-label" style="display:flex;align-items:center;gap:0.4rem;margin-left:0.5rem">
+        Avg:
+        <input type="number" id="avgWindowInput" min="2" max="28" value="4"
+          style="width:52px;background:#1e2130;border:1px solid #2e3350;color:#e0e0e0;
+                 padding:0.35rem 0.5rem;border-radius:6px;font-size:0.85rem;outline:none"
+          onchange="onAvgWindowChange(this.value)">
+      </label>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-btn active" onclick="switchTab('overview')">Overview</button>
+      <button class="tab-btn" onclick="switchTab('daily')">Daily</button>
+      <button class="tab-btn" onclick="switchTab('weekly')">Weekly</button>
+      <button class="tab-btn" onclick="switchTab('monthly')">Monthly</button>
+      <button class="tab-btn" onclick="switchTab('yearly')">Yearly</button>
+      <button class="tab-btn" onclick="switchTab('yoy')">Year-over-Year</button>
+      <button class="tab-btn" onclick="switchTab('cumulative')">Cumulative</button>
+      <button class="tab-btn" onclick="switchTab('patterns')">Patterns</button>
+      <button class="tab-btn" onclick="switchTab('goals')">Goals</button>
+      <button class="tab-btn" onclick="switchTab('heatmap')">Heatmap</button>
+    </div>
+
+    <div id="errorBanner" style="display:none; margin-bottom:1rem;"></div>
+
+    <div id="overview" class="tab-panel active">
+      <div class="stats-row" id="ov-today" style="margin-bottom:1.25rem"></div>
+      <div class="stats-row" id="ov-glance" style="margin-bottom:1.25rem"></div>
+      <div class="chart-card" style="margin-bottom:1.25rem">
+        <div class="chart-card-title">This Week</div>
+        <div class="stats-row" id="ov-week"></div>
+      </div>
+      <div class="chart-card" style="margin-bottom:1.25rem">
+        <div class="chart-card-title">All-Time Records</div>
+        <div class="stats-row" id="ov-records"></div>
+      </div>
+      <div id="ov-goals-section" style="display:none">
+        <div class="chart-card">
+          <div class="chart-card-title">Annual Goals</div>
+          <div class="stats-row" id="ov-goals"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="daily"   class="tab-panel">
+      <div class="chart-card">
+        <div class="legend" id="legend-daily"></div>
+        <div class="chart-wrapper"><canvas id="chart-daily"></canvas></div>
+      </div>
+      <div class="donut-card">
+        <h3 id="donut-title-daily">Distribution</h3>
+        <div class="donut-wrapper"><canvas id="donut-daily"></canvas></div>
+      </div>
+      <div class="stats-row" id="stats-daily"></div>
+    </div>
+
+    <div id="weekly"  class="tab-panel">
+      <div class="chart-card">
+        <div class="legend" id="legend-weekly"></div>
+        <div class="chart-wrapper"><canvas id="chart-weekly"></canvas></div>
+      </div>
+      <div class="donut-card">
+        <h3 id="donut-title-weekly">Distribution</h3>
+        <div class="donut-wrapper"><canvas id="donut-weekly"></canvas></div>
+      </div>
+      <div class="stats-row" id="stats-weekly"></div>
+    </div>
+
+    <div id="monthly" class="tab-panel">
+      <div class="chart-card">
+        <div class="legend" id="legend-monthly"></div>
+        <div class="chart-wrapper"><canvas id="chart-monthly"></canvas></div>
+      </div>
+      <div class="donut-card">
+        <h3 id="donut-title-monthly">Distribution</h3>
+        <div class="donut-wrapper"><canvas id="donut-monthly"></canvas></div>
+      </div>
+      <div class="stats-row" id="stats-monthly"></div>
+    </div>
+
+    <div id="yearly"  class="tab-panel">
+      <div class="chart-card">
+        <div class="legend" id="legend-yearly"></div>
+        <div class="chart-wrapper"><canvas id="chart-yearly"></canvas></div>
+      </div>
+      <div class="donut-card">
+        <h3 id="donut-title-yearly">Distribution</h3>
+        <div class="donut-wrapper"><canvas id="donut-yearly"></canvas></div>
+      </div>
+      <div class="stats-row" id="stats-yearly"></div>
+    </div>
+
+    <div id="yoy" class="tab-panel">
+      <div class="chart-card">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;flex-wrap:wrap;gap:0.5rem">
+          <div class="legend" id="legend-yoy" style="margin:0"></div>
+          <div style="display:flex;gap:0.4rem">
+            <button class="refresh-btn btn-active" id="yoy-btn-monthly" onclick="setYoyGran('monthly')">Monthly</button>
+            <button class="refresh-btn" id="yoy-btn-weekly" onclick="setYoyGran('weekly')">Weekly</button>
+          </div>
+        </div>
+        <div class="chart-wrapper"><canvas id="chart-yoy"></canvas></div>
+      </div>
+    </div>
+
+    <div id="cumulative" class="tab-panel">
+      <div class="chart-card">
+        <div class="legend" id="legend-cumulative"></div>
+        <div class="chart-wrapper"><canvas id="chart-cumulative"></canvas></div>
+      </div>
+      <div class="stats-row" id="stats-cumulative"></div>
+    </div>
+
+    <div id="patterns" class="tab-panel">
+      <div class="chart-card">
+        <div class="legend" id="legend-patterns"></div>
+        <div class="chart-wrapper"><canvas id="chart-patterns"></canvas></div>
+      </div>
+      <div class="stats-row" id="stats-patterns"></div>
+      <div class="chart-card" id="hour-grid-card" style="display:none">
+        <div class="chart-card-title">Time of Day</div>
+        <div class="hour-grid-wrap"><div id="hour-grid-container"></div></div>
+      </div>
+      <div class="chart-card" id="sessions-card" style="display:none">
+        <div class="chart-card-title">Recurring</div>
+        <div id="sessions-container"></div>
+      </div>
+    </div>
+
+    <div id="goals" class="tab-panel">
+      <div class="stats-row" id="stats-goals"></div>
+      <div id="goals-empty" class="chart-card" style="display:none">
+        <p style="color:#60677f; font-size:0.9rem">
+          Set <code style="background:#1e2130; padding:0.1rem 0.4rem; border-radius:3px">TOGGL_YEARLY_GOALS</code>
+          to enable annual goal tracking. Format: <code style="background:#1e2130; padding:0.1rem 0.4rem; border-radius:3px">{"project_id": hours}</code>
+        </p>
+      </div>
+    </div>
+
+    <div id="heatmap" class="tab-panel">
+      <div class="stats-row" id="streak-stats" style="margin-bottom:1.25rem;"></div>
+      <div class="chart-card">
+        <div class="heatmap-scroll" id="heatmap-container"></div>
+      </div>
+    </div>
+  </main>
+
+  <div id="hm-tooltip"></div>
+
+  <script>
+    const GRANULARITIES = ['daily', 'weekly', 'monthly', 'yearly'];
+    const ALL_CHART_KEYS = ['daily', 'weekly', 'monthly', 'yearly', 'cumulative', 'patterns'];
+    const STREAK_THRESHOLD = 1.0;
+    const PALETTE = [
+      '#4A90D9', '#27AE60', '#E74C3C', '#F39C12',
+      '#9B59B6', '#1ABC9C', '#E67E22', '#95A5A6',
+    ];
+
+    const charts = {};
+    const donuts = {};
+    let activeTab = 'overview';
+    let _projects = [];   // [{id, name, color}]
+    let _hidden = {};     // {id: bool}
+    let _targets = {};    // {pid_str: float}
+    let _rawData = null;
+    let _localTargets = {};   // {pid_str: float} from localStorage
+    let _heatmapDays = [];
+    let _heatmapMeta = { last_entry_iso: null, daily_target: null };
+    let _filterStart = null;  // Date or null
+    let _filterEnd = null;    // Date or null
+    let _yoyGran = 'monthly';
+    let _showComparison = false;
+    let _avgWindow = 4;
+
+    function onAvgWindowChange(val) {
+      const n = parseInt(val, 10);
+      if (n >= 2 && n <= 28) { _avgWindow = n; renderAll(); }
+    }
+
+    // ---- Auto-refresh ----
+    let _arTimer = null;
+    let _arCountdown = null;
+    let _arNextAt = null;
+
+    function setAutoRefresh(minutes) {
+      if (_arTimer) clearInterval(_arTimer);
+      if (_arCountdown) clearInterval(_arCountdown);
+      _arTimer = _arCountdown = _arNextAt = null;
+      const el = document.getElementById('countdown');
+      if (minutes === 0) { el.textContent = ''; return; }
+      const ms = minutes * 60 * 1000;
+      _arNextAt = Date.now() + ms;
+      _arTimer = setInterval(() => { loadData(); _arNextAt = Date.now() + ms; }, ms);
+      _arCountdown = setInterval(() => {
+        const rem = Math.max(0, _arNextAt - Date.now());
+        const m = Math.floor(rem / 60000);
+        const s = Math.floor((rem % 60000) / 1000);
+        el.textContent = `↻ ${m}:${s.toString().padStart(2, '0')}`;
+      }, 1000);
+    }
+
+    // ---- Period comparison toggle ----
+    function toggleComparison() {
+      _showComparison = !_showComparison;
+      document.getElementById('compareBtn').classList.toggle('btn-active', _showComparison);
+      renderAll();
+    }
+
+    // ---- hex color → rgba string ----
+    function hexToRgba(hex, alpha) {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${alpha})`;
+    }
+
+    // ---- rolling average helper ----
+    function rollingAvg(data, window) {
+      return data.map((_, i) => {
+        const slice = data.slice(Math.max(0, i - window + 1), i + 1);
+        return slice.reduce((a, b) => a + b, 0) / slice.length;
+      });
+    }
+
+    // ---- Date filter helpers ----
+    function periodToDate(period, gran) {
+      if (gran === 'daily' || gran === 'cumulative') {
+        return new Date(period + 'T00:00:00');
+      }
+      if (gran === 'weekly') {
+        // Parse "YYYY-Wxx" → Monday of that ISO week
+        const [yearStr, weekStr] = period.split('-W');
+        const year = parseInt(yearStr, 10);
+        const week = parseInt(weekStr, 10);
+        // Jan 4 is always in week 1 (ISO 8601)
+        const jan4 = new Date(year, 0, 4);
+        const jan4dow = jan4.getDay() || 7; // 1=Mon..7=Sun
+        const monday = new Date(jan4);
+        monday.setDate(jan4.getDate() - (jan4dow - 1) + (week - 1) * 7);
+        return monday;
+      }
+      if (gran === 'monthly') {
+        return new Date(period + '-01T00:00:00');
+      }
+      if (gran === 'yearly') {
+        return new Date(period + '-01-01T00:00:00');
+      }
+      return new Date(period);
+    }
+
+    function filterRows(rows, gran) {
+      if (!rows) return [];
+      if (!_filterStart && !_filterEnd) return rows;
+      return rows.filter(r => {
+        const d = periodToDate(r.period, gran);
+        if (_filterStart && d < _filterStart) return false;
+        if (_filterEnd && d > _filterEnd) return false;
+        return true;
+      });
+    }
+
+    function applyFilter() {
+      const startVal = document.getElementById('filter-start').value;
+      const endVal = document.getElementById('filter-end').value;
+      _filterStart = startVal ? new Date(startVal + 'T00:00:00') : null;
+      _filterEnd = endVal ? new Date(endVal + 'T23:59:59') : null;
+      renderAll();
+    }
+
+    function clearFilter() {
+      document.getElementById('filter-start').value = '';
+      document.getElementById('filter-end').value = '';
+      _filterStart = null;
+      _filterEnd = null;
+      renderAll();
+    }
+
+    function renderAll() {
+      if (!_rawData) return;
+      GRANULARITIES.forEach(g => {
+        const rows = filterRows(_rawData[g] || [], g);
+        buildLegend(g);
+        buildChart(g, rows);
+        buildDonut(g, rows);
+        buildStats(g, rows);
+      });
+      const cumulativeRows = filterRows(_rawData['daily'] || [], 'cumulative');
+      buildLegend('cumulative');
+      buildCumulative(cumulativeRows);
+      buildCumulativeStats(cumulativeRows);
+
+      const patternRows = filterRows(_rawData['daily'] || [], 'daily');
+      buildLegend('patterns');
+      buildPatterns(patternRows);
+      buildPatternStats(patternRows);
+
+      buildGoals(_rawData);
+      buildYoY(_rawData);
+      buildOverview(_rawData, _heatmapDays);
+    }
+
+    function switchTab(name) {
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById(name).classList.add('active');
+      document.querySelectorAll('.tab-btn').forEach(b => {
+        if (b.textContent.trim().toLowerCase() === name) b.classList.add('active');
+      });
+      activeTab = name;
+    }
+
+    function toggleProject(id) {
+      _hidden[id] = !_hidden[id];
+      _saveHidden();
+      ALL_CHART_KEYS.forEach(g => {
+        const chart = charts[g];
+        if (!chart) return;
+        // Match all datasets with _projectId === id (main + avg)
+        chart.data.datasets.forEach(ds => {
+          if (ds._projectId === id) ds.hidden = !!_hidden[id];
+        });
+        chart.update();
+      });
+      document.querySelectorAll(`.legend-item[data-id="${id}"]`).forEach(el => {
+        el.classList.toggle('hidden', !!_hidden[id]);
+      });
+    }
+
+    function _saveHidden() {
+      const toSave = {};
+      Object.entries(_hidden).forEach(([k, v]) => { if (v) toSave[k] = true; });
+      localStorage.setItem('toggl_hidden_projects', JSON.stringify(toSave));
+    }
+
+    function _loadHidden() {
+      try {
+        const raw = localStorage.getItem('toggl_hidden_projects');
+        if (!raw) return {};
+        const obj = JSON.parse(raw);
+        if (typeof obj === 'object' && obj !== null) return obj;
+      } catch (_) {}
+      return {};
+    }
+
+    function buildLegend(granularity) {
+      const el = document.getElementById(`legend-${granularity}`);
+      el.innerHTML = _projects.map(p => `
+        <span class="legend-item" data-id="${p.id}" onclick="toggleProject(${p.id})">
+          <span class="legend-dot" style="background:${p.color}"></span>${p.name}
+        </span>`).join('');
+    }
+
+    function buildChart(granularity, rows) {
+      const labels = rows.map(r => r.period);
+      const manyPoints = labels.length > 60;
+
+      const datasets = [];
+
+      // ---- Previous-period comparison datasets ----
+      if (_showComparison && _rawData && rows.length > 0) {
+        const allRows = _rawData[granularity] || [];
+        const firstPeriod = rows[0].period;
+        const firstIdx = allRows.findIndex(r => r.period === firstPeriod);
+        if (firstIdx > 0) {
+          const prevRows = allRows.slice(Math.max(0, firstIdx - rows.length), firstIdx);
+          _projects.forEach(p => {
+            const prevValues = prevRows.map(r => r[String(p.id)] ?? 0);
+            // Right-align to current length
+            const aligned = new Array(rows.length).fill(null);
+            for (let i = 0; i < prevValues.length; i++) {
+              aligned[rows.length - prevValues.length + i] = prevValues[i];
+            }
+            datasets.push({
+              label: p.name + ' (prev)',
+              _projectId: p.id,
+              _isComparison: true,
+              data: aligned,
+              borderColor: hexToRgba(p.color, 0.3),
+              backgroundColor: 'transparent',
+              pointRadius: 0,
+              pointHoverRadius: 3,
+              borderWidth: 1.5,
+              borderDash: [5, 4],
+              tension: 0.3,
+              fill: false,
+              hidden: !!_hidden[p.id],
+            });
+          });
+        }
+      }
+
+      _projects.forEach(p => {
+        const values = rows.map(r => r[String(p.id)] ?? 0);
+        const avgValues = rollingAvg(values, _avgWindow);
+
+        // Main dataset
+        datasets.push({
+          label: p.name,
+          _projectId: p.id,
+          data: values,
+          borderColor: p.color,
+          backgroundColor: p.color + '18',
+          pointRadius: manyPoints ? 0 : 3,
+          pointHoverRadius: 5,
+          tension: 0.3,
+          fill: false,
+          hidden: !!_hidden[p.id],
+        });
+
+        // Rolling average companion dataset
+        datasets.push({
+          label: p.name + ' (avg)',
+          _projectId: p.id,
+          _isAvg: true,
+          data: avgValues,
+          borderColor: hexToRgba(p.color, 0.4),
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          pointHoverRadius: 0,
+          borderWidth: 1,
+          borderDash: [4, 3],
+          tension: 0.3,
+          fill: false,
+          hidden: !!_hidden[p.id],
+        });
+      });
+
+      const canvas = document.getElementById(`chart-${granularity}`);
+      if (charts[granularity]) charts[granularity].destroy();
+
+      charts[granularity] = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#1a1d2b',
+              borderColor: '#2e3350',
+              borderWidth: 1,
+              titleColor: '#a0a8c0',
+              bodyColor: '#e0e0e0',
+              filter: item => item.parsed.y != null && item.parsed.y > 0 && !item.dataset._isAvg,
+              callbacks: {
+                label: ctx => {
+                  const suffix = ctx.dataset._isComparison ? ' ←prev' : '';
+                  const name = ctx.dataset._isComparison
+                    ? ctx.dataset.label.replace(' (prev)', '')
+                    : ctx.dataset.label;
+                  return ` ${name}${suffix}: ${ctx.parsed.y.toFixed(2)}h`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              grid: { color: '#1e2130' },
+              ticks: { color: '#60677f', maxTicksLimit: 12, maxRotation: 45 },
+            },
+            y: {
+              grid: { color: '#1e2130' },
+              ticks: { color: '#60677f', callback: v => v + 'h' },
+              beginAtZero: true,
+            },
+          },
+        },
+      });
+    }
+
+    // ---- Cumulative chart ----
+    function buildCumulative(dailyRows) {
+      const labels = dailyRows.map(r => r.period);
+      const datasets = [];
+
+      _projects.forEach(p => {
+        const values = dailyRows.map(r => r[String(p.id)] ?? 0);
+        // Running sum
+        let running = 0;
+        const cumValues = values.map(v => { running += v; return running; });
+
+        datasets.push({
+          label: p.name,
+          _projectId: p.id,
+          data: cumValues,
+          borderColor: p.color,
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          pointHoverRadius: 5,
+          tension: 0.4,
+          fill: false,
+          hidden: !!_hidden[p.id],
+        });
+      });
+
+      const canvas = document.getElementById('chart-cumulative');
+      if (charts['cumulative']) charts['cumulative'].destroy();
+
+      charts['cumulative'] = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#1a1d2b',
+              borderColor: '#2e3350',
+              borderWidth: 1,
+              titleColor: '#a0a8c0',
+              bodyColor: '#e0e0e0',
+              filter: item => item.parsed.y > 0,
+              callbacks: {
+                label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)}h`,
+              },
+            },
+          },
+          scales: {
+            x: {
+              grid: { color: '#1e2130' },
+              ticks: { color: '#60677f', maxTicksLimit: 12, maxRotation: 45 },
+            },
+            y: {
+              grid: { color: '#1e2130' },
+              ticks: { color: '#60677f', callback: v => v + 'h' },
+              beginAtZero: true,
+            },
+          },
+        },
+      });
+    }
+
+    function buildCumulativeStats(dailyRows) {
+      const container = document.getElementById('stats-cumulative');
+      if (!dailyRows || dailyRows.length === 0) { container.innerHTML = ''; return; }
+
+      container.innerHTML = _projects.map(p => {
+        const total = dailyRows.reduce((sum, r) => sum + (r[String(p.id)] ?? 0), 0);
+        return `
+          <div class="stat-card" style="border-top:2px solid ${p.color}">
+            <div class="label">${p.name}</div>
+            <div class="value" style="color:${p.color}">${total.toFixed(1)}h</div>
+            <div class="deviation">total in range</div>
+          </div>`;
+      }).join('');
+    }
+
+    // ---- Donut chart ----
+    // Plugin: draw total hours in center
+    const centerTextPlugin = {
+      id: 'centerText',
+      afterDraw(chart) {
+        if (chart.config.type !== 'doughnut') return;
+        const total = chart.config.options._totalHours;
+        if (total == null) return;
+        const { ctx, chartArea } = chart;
+        const cx = (chartArea.left + chartArea.right) / 2;
+        const cy = (chartArea.top + chartArea.bottom) / 2;
+        ctx.save();
+        ctx.font = 'bold 1.4rem -apple-system, sans-serif';
+        ctx.fillStyle = '#e0e0e0';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(total.toFixed(1) + 'h', cx, cy);
+        ctx.restore();
+      },
+    };
+    Chart.register(centerTextPlugin);
+
+    function buildDonut(granularity, rows) {
+      if (!rows || rows.length === 0) return;
+      const last = rows[rows.length - 1];
+      const period = last.period;
+
+      // Only projects with hours > 0
+      const visible = _projects.filter(p => (last[String(p.id)] ?? 0) > 0);
+      if (visible.length === 0) return;
+
+      const labels = visible.map(p => p.name);
+      const values = visible.map(p => last[String(p.id)]);
+      const colors = visible.map(p => p.color);
+      const total = values.reduce((a, b) => a + b, 0);
+
+      document.getElementById(`donut-title-${granularity}`).textContent =
+        `Distribution — ${period}`;
+
+      const canvas = document.getElementById(`donut-${granularity}`);
+      if (donuts[granularity]) donuts[granularity].destroy();
+
+      donuts[granularity] = new Chart(canvas.getContext('2d'), {
+        type: 'doughnut',
+        data: {
+          labels,
+          datasets: [{
+            data: values,
+            backgroundColor: colors,
+            borderColor: '#161820',
+            borderWidth: 2,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          cutout: '65%',
+          _totalHours: total,
+          plugins: {
+            legend: {
+              display: true,
+              position: 'right',
+              labels: { color: '#a0a8c0', font: { size: 12 }, padding: 16 },
+            },
+            tooltip: {
+              backgroundColor: '#1a1d2b',
+              borderColor: '#2e3350',
+              borderWidth: 1,
+              titleColor: '#a0a8c0',
+              bodyColor: '#e0e0e0',
+              callbacks: {
+                label: ctx => ` ${ctx.label}: ${ctx.parsed.toFixed(2)}h`,
+              },
+            },
+          },
+        },
+      });
+    }
+
+    function deviationBadge(last, prev) {
+      if (!prev || prev === 0) return '';
+      const pct = ((last - prev) / prev) * 100;
+      const sign = pct >= 0 ? '+' : '';
+      const cls  = pct >= 0 ? 'up' : 'down';
+      return `<span class="${cls}">${pct >= 0 ? '↑' : '↓'} ${sign}${pct.toFixed(0)}% vs prev</span>`;
+    }
+
+    function weekDeltaBadge(curr, prev) {
+      if (prev === undefined || prev === null || prev === 0) return '';
+      const diff = curr - prev;
+      const pct  = (diff / prev) * 100;
+      const sign = diff >= 0 ? '+' : '';
+      const cls  = diff >= 0 ? 'up' : 'down';
+      const arrow = diff >= 0 ? '↑' : '↓';
+      return `<span class="${cls}">${arrow} ${sign}${diff.toFixed(1)}h (${sign}${pct.toFixed(0)}%) vs last week</span>`;
+    }
+
+    function buildStats(granularity, rows) {
+      const container = document.getElementById(`stats-${granularity}`);
+      if (!rows || rows.length === 0) { container.innerHTML = ''; return; }
+      const last = rows[rows.length - 1];
+      const prev = rows.length > 1 ? rows[rows.length - 2] : null;
+
+      container.innerHTML = _projects.map(p => {
+        const lastVal = last[String(p.id)] ?? 0;
+        const prevVal = prev ? (prev[String(p.id)] ?? 0) : 0;
+        const badge = deviationBadge(lastVal, prevVal);
+        const pidStr = String(p.id);
+
+        let targetHtml = '';
+        if (granularity === 'weekly' && _targets[pidStr] != null) {
+          const target = _targets[pidStr];
+          const pct = Math.min((lastVal / target) * 100, 100).toFixed(1);
+          const projectedPace = (lastVal * 52 / 12).toFixed(1);
+          const onTrackBadge = lastVal >= target
+            ? `<span class="up">✓ On track</span>`
+            : `<span class="down">↓ ${(target - lastVal).toFixed(1)}h short</span>`;
+          targetHtml = `
+            <div class="target-row">
+              <div class="target-label">${lastVal.toFixed(1)}h / ${target.toFixed(1)}h target</div>
+              <div class="progress-track">
+                <div class="progress-fill" style="width:${pct}%; background:${p.color}"></div>
+              </div>
+              <div class="deviation">Pace: ${projectedPace}h/mo projected · ${onTrackBadge}</div>
+            </div>`;
+        }
+
+        return `
+          <div class="stat-card" style="border-top:2px solid ${p.color}">
+            <div class="label">${p.name} — ${last.period}</div>
+            <div class="value" style="color:${p.color}">${lastVal.toFixed(1)}h</div>
+            ${badge ? `<div class="deviation">${badge}</div>` : ''}
+            ${targetHtml}
+          </div>`;
+      }).join('');
+    }
+
+    // ---- Shared heatmap metrics ----
+    function computeHeatmapMetrics(days) {
+      if (!days || days.length === 0) return { currentStreak: 0, bestStreak: 0, consistencyPct: 0, activeDays: 0 };
+      const sorted = [...days].sort((a, b) => a.date.localeCompare(b.date));
+
+      let bestStreak = 0, curRun = 0, prevDate = null;
+      for (const day of sorted) {
+        if ((day.total ?? 0) >= STREAK_THRESHOLD) {
+          if (prevDate !== null) {
+            const diff = Math.round((new Date(day.date + 'T00:00:00') - new Date(prevDate + 'T00:00:00')) / 86400000);
+            curRun = diff === 1 ? curRun + 1 : 1;
+          } else { curRun = 1; }
+          bestStreak = Math.max(bestStreak, curRun);
+          prevDate = day.date;
+        } else { curRun = 0; prevDate = null; }
+      }
+
+      const lastEntry = sorted[sorted.length - 1];
+      const lastDate = new Date(lastEntry.date + 'T00:00:00');
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const diffFromNow = Math.round((today - lastDate) / 86400000);
+      let currentStreak = 0;
+      if (diffFromNow <= 1) {
+        let expected = lastDate;
+        for (let i = sorted.length - 1; i >= 0; i--) {
+          const d = sorted[i], dt = new Date(d.date + 'T00:00:00');
+          if (Math.round((expected - dt) / 86400000) > 0) break;
+          if ((d.total ?? 0) < STREAK_THRESHOLD) break;
+          currentStreak++;
+          expected = new Date(dt); expected.setDate(expected.getDate() - 1);
+        }
+      }
+
+      const thirtyAgo = new Date(today); thirtyAgo.setDate(thirtyAgo.getDate() - 29);
+      const last30 = sorted.filter(d => { const dt = new Date(d.date + 'T00:00:00'); return dt >= thirtyAgo && dt <= today; });
+      const activeDays = last30.filter(d => (d.total ?? 0) >= STREAK_THRESHOLD).length;
+      const consistencyPct = Math.round(activeDays / 30 * 100);
+
+      return { currentStreak, bestStreak, consistencyPct, activeDays };
+    }
+
+    // ---- Year-over-Year chart ----
+    const YOY_COLORS = ['#4A90D9','#27AE60','#E74C3C','#F39C12','#9B59B6','#1ABC9C','#E67E22'];
+
+    function setYoyGran(gran) {
+      _yoyGran = gran;
+      document.getElementById('yoy-btn-monthly').classList.toggle('btn-active', gran === 'monthly');
+      document.getElementById('yoy-btn-weekly').classList.toggle('btn-active', gran === 'weekly');
+      buildYoY(_rawData);
+    }
+
+    function buildYoY(data) {
+      if (!data) return;
+      const rows = data[_yoyGran] || [];
+      // Group by year → { year: { periodKey: totalHours } }
+      const byYear = {};
+      rows.forEach(r => {
+        let year, key;
+        if (_yoyGran === 'monthly') {
+          [year, key] = r.period.split('-').map(Number);
+        } else {
+          const [y, w] = r.period.split('-W');
+          year = parseInt(y, 10); key = parseInt(w, 10);
+        }
+        if (!byYear[year]) byYear[year] = {};
+        byYear[year][key] = _projects.reduce((s, p) => s + (r[String(p.id)] ?? 0), 0);
+      });
+
+      const years = Object.keys(byYear).sort();
+      const legendEl = document.getElementById('legend-yoy');
+      if (!years.length) { legendEl.innerHTML = ''; return; }
+
+      let labels, maxKey;
+      if (_yoyGran === 'monthly') {
+        labels = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+        maxKey = 12;
+      } else {
+        maxKey = Math.max(...years.flatMap(y => Object.keys(byYear[y]).map(Number)));
+        labels = Array.from({length: maxKey}, (_, i) => `W${i + 1}`);
+      }
+
+      const datasets = years.map((y, i) => ({
+        label: String(y),
+        data: Array.from({length: maxKey}, (_, idx) => byYear[y][idx + 1] ?? 0),
+        borderColor: YOY_COLORS[i % YOY_COLORS.length],
+        backgroundColor: 'transparent',
+        pointRadius: _yoyGran === 'monthly' ? 4 : 0,
+        pointHoverRadius: 5,
+        tension: 0.3,
+        fill: false,
+      }));
+
+      legendEl.innerHTML = years.map((y, i) => `
+        <span class="legend-item">
+          <span class="legend-dot" style="background:${YOY_COLORS[i % YOY_COLORS.length]}"></span>${y}
+        </span>`).join('');
+
+      const canvas = document.getElementById('chart-yoy');
+      if (charts['yoy']) charts['yoy'].destroy();
+      charts['yoy'] = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { labels, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#1a1d2b', borderColor: '#2e3350', borderWidth: 1,
+              titleColor: '#a0a8c0', bodyColor: '#e0e0e0',
+              filter: item => item.parsed.y > 0,
+              callbacks: { label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}h` },
+            },
+          },
+          scales: {
+            x: { grid: { color: '#1e2130' }, ticks: { color: '#60677f' } },
+            y: { grid: { color: '#1e2130' }, ticks: { color: '#60677f', callback: v => v + 'h' }, beginAtZero: true },
+          },
+        },
+      });
+    }
+
+    // ---- Overview tab ----
+    function buildTodayCard(days, meta) {
+      const today = new Date().toISOString().slice(0, 10);
+      const entry = days.find(d => d.date === today);
+      const hrs = entry ? entry.total : 0;
+
+      let agoHtml = '';
+      if (meta.last_entry_iso) {
+        try {
+          const diff = Math.floor((Date.now() - new Date(meta.last_entry_iso)) / 60000);
+          const agoStr = diff < 60 ? `${diff}m ago`
+            : diff < 1440 ? `${Math.floor(diff / 60)}h ago`
+            : `${Math.floor(diff / 1440)}d ago`;
+          agoHtml = `<div class="deviation">Last entry: ${agoStr}</div>`;
+        } catch {}
+      }
+
+      let barHtml = '';
+      if (meta.daily_target) {
+        const pct = Math.min(hrs / meta.daily_target * 100, 100).toFixed(1);
+        const badge = hrs >= meta.daily_target
+          ? `<span class="up">✓ Done</span>`
+          : `<span class="down">${(meta.daily_target - hrs).toFixed(1)}h left</span>`;
+        barHtml = `
+          <div class="target-row">
+            <div class="target-label">${hrs.toFixed(1)}h / ${meta.daily_target.toFixed(1)}h · ${badge}</div>
+            <div class="progress-track">
+              <div class="progress-fill" style="width:${pct}%;background:#4A90D9"></div>
+            </div>
+          </div>`;
+      }
+
+      return `
+        <div class="stat-card" style="border-top:2px solid #4A90D9;flex:0 0 200px">
+          <div class="label">Today — ${today}</div>
+          <div class="value" style="color:#4A90D9">${hrs.toFixed(1)}h</div>
+          ${agoHtml}${barHtml}
+        </div>`;
+    }
+
+    function buildOverview(data, days) {
+      if (!data || !_projects.length) return;
+
+      // Today card
+      document.getElementById('ov-today').innerHTML = buildTodayCard(days, _heatmapMeta);
+
+      const { currentStreak, consistencyPct } = computeHeatmapMetrics(days);
+
+      // At-a-glance row
+      const weekRows = data.weekly || [];
+      const lastWeek = weekRows[weekRows.length - 1] || {};
+      const prevWeekGlance = weekRows[weekRows.length - 2] || {};
+      const weekTotal = _projects.reduce((s, p) => s + (lastWeek[String(p.id)] ?? 0), 0);
+      const prevWeekTotal = _projects.reduce((s, p) => s + (prevWeekGlance[String(p.id)] ?? 0), 0);
+      const totalDelta = weekDeltaBadge(weekTotal, prevWeekTotal);
+      document.getElementById('ov-glance').innerHTML = `
+        <div class="stat-card" style="border-top:2px solid #4A90D9">
+          <div class="label">This Week Total</div>
+          <div class="value" style="color:#4A90D9">${weekTotal.toFixed(1)}h</div>
+          <div class="deviation">${lastWeek.period || '—'}${totalDelta ? ' · ' + totalDelta : ''}</div>
+        </div>
+        <div class="stat-card" style="border-top:2px solid #27AE60">
+          <div class="label">Current Streak</div>
+          <div class="value" style="color:#27AE60">${currentStreak} day${currentStreak !== 1 ? 's' : ''}</div>
+          <div class="deviation">≥${STREAK_THRESHOLD}h/day</div>
+        </div>
+        <div class="stat-card" style="border-top:2px solid #9B59B6">
+          <div class="label">Consistency (30d)</div>
+          <div class="value" style="color:#9B59B6">${consistencyPct}%</div>
+        </div>`;
+
+      // This week per-project
+      document.getElementById('ov-week').innerHTML = _projects.map(p => {
+        const h  = lastWeek[String(p.id)] ?? 0;
+        const ph = prevWeekGlance[String(p.id)] ?? 0;
+        const badge = weekDeltaBadge(h, ph);
+        const target = _targets[String(p.id)];
+        let targetHtml = '';
+        if (target != null && target > 0) {
+          const pct = Math.min((h / target) * 100, 100);
+          const onTrack = h >= target;
+          targetHtml = `<div class="deviation">${h.toFixed(1)}h / ${target.toFixed(0)}h · ${onTrack ? '<span class="up">✓ done</span>' : '<span class="down">' + pct.toFixed(0) + '%</span>'}</div>
+          <div class="target-row"><div class="progress-track">
+            <div class="progress-fill" style="width:${pct.toFixed(1)}%;background:${p.color}"></div>
+          </div></div>`;
+        }
+        return `<div class="stat-card" style="border-top:2px solid ${p.color}">
+          <div class="label">${p.name}</div>
+          <div class="value" style="color:${p.color}">${h.toFixed(1)}h</div>
+          ${targetHtml}
+          ${badge ? `<div class="deviation">${badge}</div>` : ''}
+        </div>`;
+      }).join('');
+
+      // Records
+      buildRecords(data);
+
+      // Goals summary
+      const goals = data.yearly_goals || {};
+      const goalsSection = document.getElementById('ov-goals-section');
+      if (Object.keys(goals).length === 0) { goalsSection.style.display = 'none'; return; }
+      goalsSection.style.display = '';
+      const currentYear = new Date().getFullYear();
+      const yearRow = (data.yearly || []).find(r => r.period === String(currentYear)) || {};
+      const isLeap = y => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+      const daysInYear = isLeap(currentYear) ? 366 : 365;
+      const daysElapsed = Math.round((new Date() - new Date(currentYear, 0, 1)) / 86400000) + 1;
+      const projectMap = Object.fromEntries(_projects.map(p => [String(p.id), p]));
+      document.getElementById('ov-goals').innerHTML = Object.entries(goals).map(([pid, goal]) => {
+        const p = projectMap[pid]; if (!p) return '';
+        const actual = yearRow[pid] ?? 0;
+        const pct = Math.min(actual / goal * 100, 100);
+        const onTrack = actual >= (daysElapsed / daysInYear) * goal;
+        return `<div class="stat-card" style="border-top:2px solid ${p.color}">
+          <div class="label">${p.name} ${currentYear}</div>
+          <div class="value" style="color:${p.color}">${actual.toFixed(1)}h</div>
+          <div class="deviation">of ${goal.toFixed(0)}h · ${onTrack ? '<span class="up">✓ On pace</span>' : '<span class="down">Behind</span>'}</div>
+          <div class="target-row"><div class="progress-track">
+            <div class="progress-fill" style="width:${pct.toFixed(1)}%;background:${p.color}"></div>
+          </div></div>
+        </div>`;
+      }).join('');
+    }
+
+    function buildRecords(data) {
+      const container = document.getElementById('ov-records');
+      const labels = { daily: 'Best Day', weekly: 'Best Week', monthly: 'Best Month' };
+      const colors = { daily: '#E74C3C', weekly: '#F39C12', monthly: '#1ABC9C' };
+      const html = ['daily', 'weekly', 'monthly'].map(gran => {
+        const rows = data[gran] || [];
+        if (!rows.length) return '';
+        let best = null, bestTotal = 0;
+        rows.forEach(r => {
+          const t = _projects.reduce((s, p) => s + (r[String(p.id)] ?? 0), 0);
+          if (t > bestTotal) { bestTotal = t; best = r; }
+        });
+        if (!best) return '';
+        return `<div class="stat-card" style="border-top:2px solid ${colors[gran]}">
+          <div class="label">${labels[gran]}</div>
+          <div class="value" style="color:${colors[gran]}">${bestTotal.toFixed(1)}h</div>
+          <div class="deviation">${best.period}</div>
+        </div>`;
+      }).join('');
+      container.innerHTML = html || '<span style="color:#60677f;font-size:0.85rem">No data yet.</span>';
+    }
+
+    // ---- Streak computation ----
+    function buildHeatmapStats(days) {
+      const container = document.getElementById('streak-stats');
+      if (!days || days.length === 0) { container.innerHTML = ''; return; }
+      const { currentStreak, bestStreak, consistencyPct, activeDays } = computeHeatmapMetrics(days);
+      container.innerHTML = `
+        <div class="stat-card" style="border-top:2px solid #27AE60">
+          <div class="label">Current Streak</div>
+          <div class="value" style="color:#27AE60">${currentStreak} day${currentStreak !== 1 ? 's' : ''}</div>
+          <div class="deviation">≥${STREAK_THRESHOLD}h/day</div>
+        </div>
+        <div class="stat-card" style="border-top:2px solid #4A90D9">
+          <div class="label">Best Streak</div>
+          <div class="value" style="color:#4A90D9">${bestStreak} day${bestStreak !== 1 ? 's' : ''}</div>
+          <div class="deviation">all-time longest run</div>
+        </div>
+        <div class="stat-card" style="border-top:2px solid #9B59B6">
+          <div class="label">Consistency (30d)</div>
+          <div class="value" style="color:#9B59B6">${consistencyPct}%</div>
+          <div class="deviation">${activeDays} / 30 active days</div>
+        </div>`;
+    }
+
+    // ---- Heatmap ----
+    const HM_COLORS = [
+      '#161820',  // 0h
+      '#1a3a2a',  // >0h dim
+      '#1f6b44',  // >2h medium
+      '#27AE60',  // >4h bright
+      '#52d68a',  // >6h brightest
+    ];
+
+    function hmColor(hours) {
+      if (hours <= 0) return HM_COLORS[0];
+      if (hours <= 2) return HM_COLORS[1];
+      if (hours <= 4) return HM_COLORS[2];
+      if (hours <= 6) return HM_COLORS[3];
+      return HM_COLORS[4];
+    }
+
+    function buildHeatmap(days) {
+      const container = document.getElementById('heatmap-container');
+      if (!days || days.length === 0) {
+        container.innerHTML = '<p style="color:#60677f;padding:1rem">No heatmap data available.</p>';
+        return;
+      }
+
+      // Index days by date string
+      const byDate = {};
+      days.forEach(d => { byDate[d.date] = d; });
+
+      // Find date range
+      const firstDate = new Date(days[0].date + 'T00:00:00');
+      const lastDate = new Date(days[days.length - 1].date + 'T00:00:00');
+
+      // Start from the Monday of the week containing firstDate
+      const startMonday = new Date(firstDate);
+      const dow = startMonday.getDay(); // 0=Sun
+      const offset = dow === 0 ? -6 : 1 - dow;
+      startMonday.setDate(startMonday.getDate() + offset);
+
+      // End at the Sunday of the week containing lastDate
+      const endSunday = new Date(lastDate);
+      const edow = endSunday.getDay();
+      const endOffset = edow === 0 ? 0 : 7 - edow;
+      endSunday.setDate(endSunday.getDate() + endOffset);
+
+      // Build weeks array: each week is array of 7 dates (Mon..Sun)
+      const weeks = [];
+      let cur = new Date(startMonday);
+      while (cur <= endSunday) {
+        const week = [];
+        for (let i = 0; i < 7; i++) {
+          week.push(new Date(cur));
+          cur.setDate(cur.getDate() + 1);
+        }
+        weeks.push(week);
+      }
+
+      // Day labels: M, W, F (indices 0=Mon, 1=Tue, ...)
+      const DAY_LABELS = ['M', '', 'W', '', 'F', '', ''];
+
+      // Build grid HTML
+      const tooltip = document.getElementById('hm-tooltip');
+
+      // Left labels column
+      let html = '<div class="heatmap-grid">';
+      html += '<div class="hm-labels-col">';
+      DAY_LABELS.forEach(lbl => {
+        html += `<div class="hm-day-label">${lbl}</div>`;
+      });
+      html += '</div>';
+
+      // Week columns
+      let prevMonth = -1;
+      weeks.forEach((week, wi) => {
+        const firstDayOfWeek = week[0];
+        const monthNum = firstDayOfWeek.getMonth();
+        const monthLabel = monthNum !== prevMonth
+          ? firstDayOfWeek.toLocaleString('default', { month: 'short' })
+          : '';
+        prevMonth = monthNum;
+
+        html += '<div class="hm-week-col">';
+        html += `<div class="hm-month-label">${monthLabel}</div>`;
+        week.forEach(d => {
+          const iso = d.toISOString().slice(0, 10);
+          const entry = byDate[iso];
+          const hrs = entry ? entry.total : 0;
+          const color = hmColor(hrs);
+          html += `<div class="hm-cell" style="background:${color}" data-date="${iso}" data-hours="${hrs.toFixed(2)}"></div>`;
+        });
+        html += '</div>';
+      });
+
+      html += '</div>';
+      container.innerHTML = html;
+
+      // Attach tooltip events
+      container.querySelectorAll('.hm-cell').forEach(cell => {
+        cell.addEventListener('mouseenter', e => {
+          const d = e.target.dataset;
+          tooltip.textContent = `${d.date}: ${d.hours}h total`;
+          tooltip.style.display = 'block';
+        });
+        cell.addEventListener('mousemove', e => {
+          tooltip.style.left = (e.clientX + 12) + 'px';
+          tooltip.style.top = (e.clientY - 8) + 'px';
+        });
+        cell.addEventListener('mouseleave', () => {
+          tooltip.style.display = 'none';
+        });
+      });
+    }
+
+    // ---- Day-of-week pattern bar chart ----
+    function buildPatterns(dailyRows) {
+      const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      // Aggregate hours per project per weekday (0=Mon..6=Sun)
+      const byProjDay = {};
+      _projects.forEach(p => {
+        byProjDay[p.id] = [0, 0, 0, 0, 0, 0, 0];
+      });
+      dailyRows.forEach(r => {
+        const raw = new Date(r.period + 'T00:00:00').getDay(); // 0=Sun
+        const dow = raw === 0 ? 6 : raw - 1; // convert to 0=Mon..6=Sun
+        _projects.forEach(p => {
+          byProjDay[p.id][dow] += (r[String(p.id)] ?? 0);
+        });
+      });
+
+      const datasets = _projects.map(p => ({
+        label: p.name,
+        _projectId: p.id,
+        data: byProjDay[p.id],
+        backgroundColor: p.color + 'cc',
+        borderColor: p.color,
+        borderWidth: 1,
+        hidden: !!_hidden[p.id],
+      }));
+
+      const canvas = document.getElementById('chart-patterns');
+      if (charts['patterns']) charts['patterns'].destroy();
+
+      charts['patterns'] = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: { labels: DAY_LABELS, datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: '#1a1d2b',
+              borderColor: '#2e3350',
+              borderWidth: 1,
+              titleColor: '#a0a8c0',
+              bodyColor: '#e0e0e0',
+              filter: item => item.parsed.y > 0,
+              callbacks: {
+                label: ctx => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}h`,
+              },
+            },
+          },
+          scales: {
+            x: {
+              stacked: true,
+              grid: { color: '#1e2130' },
+              ticks: { color: '#60677f' },
+            },
+            y: {
+              stacked: true,
+              grid: { color: '#1e2130' },
+              ticks: { color: '#60677f', callback: v => v + 'h' },
+              beginAtZero: true,
+            },
+          },
+        },
+      });
+    }
+
+    function buildPatternStats(dailyRows) {
+      const container = document.getElementById('stats-patterns');
+      const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      const totals = [0, 0, 0, 0, 0, 0, 0];
+      dailyRows.forEach(r => {
+        const raw = new Date(r.period + 'T00:00:00').getDay();
+        const dow = raw === 0 ? 6 : raw - 1;
+        _projects.forEach(p => {
+          totals[dow] += (r[String(p.id)] ?? 0);
+        });
+      });
+
+      const active = totals.map((h, i) => ({ i, h })).filter(x => x.h > 0);
+      if (active.length === 0) { container.innerHTML = ''; return; }
+
+      const most = active.reduce((a, b) => a.h >= b.h ? a : b);
+      const least = active.reduce((a, b) => a.h <= b.h ? a : b);
+
+      container.innerHTML = `
+        <div class="stat-card" style="border-top:2px solid #27AE60">
+          <div class="label">Most Active Day</div>
+          <div class="value" style="color:#27AE60">${DAY_LABELS[most.i]}</div>
+          <div class="deviation">${most.h.toFixed(1)}h total</div>
+        </div>
+        <div class="stat-card" style="border-top:2px solid #60677f">
+          <div class="label">Least Active Day</div>
+          <div class="value" style="color:#60677f">${DAY_LABELS[least.i]}</div>
+          <div class="deviation">${least.h.toFixed(1)}h total</div>
+        </div>`;
+    }
+
+    // ---- Annual goal burndown ----
+    function buildGoals(data) {
+      const statsEl = document.getElementById('stats-goals');
+      const emptyEl = document.getElementById('goals-empty');
+      const yearly_goals = data.yearly_goals || {};
+
+      if (Object.keys(yearly_goals).length === 0) {
+        statsEl.style.display = 'none';
+        emptyEl.style.display = '';
+        return;
+      }
+      statsEl.style.display = '';
+      emptyEl.style.display = 'none';
+
+      const currentYear = new Date().getFullYear();
+      const yearRow = (data.yearly || []).find(r => r.period === String(currentYear)) || {};
+
+      const isLeap = y => (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+      const daysInYear = isLeap(currentYear) ? 366 : 365;
+      const jan1 = new Date(currentYear, 0, 1);
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const daysElapsed = Math.round((today - jan1) / 86400000) + 1;
+      const weeksRemaining = Math.max((daysInYear - daysElapsed) / 7, 0);
+
+      const projectMap = {};
+      _projects.forEach(p => { projectMap[String(p.id)] = p; });
+
+      statsEl.innerHTML = Object.entries(yearly_goals).map(([pid, goal]) => {
+        const p = projectMap[pid];
+        if (!p) return '';
+        const actual = yearRow[pid] ?? 0;
+        const pct = Math.min(actual / goal * 100, 100);
+        const expected = (daysElapsed / daysInYear) * goal;
+        const onTrack = actual >= expected;
+        const remaining = Math.max(goal - actual, 0);
+        const neededPerWeek = weeksRemaining > 0 ? (remaining / weeksRemaining).toFixed(1) : '0.0';
+        const badge = onTrack
+          ? `<span class="up">✓ On pace</span>`
+          : `<span class="down">Need ${neededPerWeek}h/wk</span>`;
+
+        return `
+          <div class="stat-card" style="flex:1 1 220px; border-top:2px solid ${p.color}">
+            <div class="label">${p.name} — ${currentYear}</div>
+            <div class="value" style="color:${p.color}">${actual.toFixed(1)}h</div>
+            <div class="deviation">of ${goal.toFixed(0)}h goal (${pct.toFixed(0)}%) · ${badge}</div>
+            <div class="target-row">
+              <div class="progress-track">
+                <div class="progress-fill" style="width:${pct.toFixed(1)}%; background:${p.color}"></div>
+              </div>
+              <div style="margin-top:0.3rem">${remaining.toFixed(1)}h remaining</div>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    // ---- Hour-of-day grid ----
+    function buildHourGrid(slots) {
+      const card = document.getElementById('hour-grid-card');
+      const container = document.getElementById('hour-grid-container');
+      if (!slots || slots.length === 0) { card.style.display = 'none'; return; }
+      card.style.display = '';
+
+      // Build 7×24 grid
+      const grid = Array.from({length: 7}, () => new Array(24).fill(0));
+      let maxHrs = 0;
+      slots.forEach(s => {
+        grid[s.dow][s.hour] = s.hours;
+        if (s.hours > maxHrs) maxHrs = s.hours;
+      });
+
+      const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      const HM_C = ['#161820', '#1a3a2a', '#1f6b44', '#27AE60', '#52d68a'];
+      function hc(hrs) {
+        if (maxHrs === 0 || hrs === 0) return HM_C[0];
+        const r = hrs / maxHrs;
+        if (r < 0.1) return HM_C[1];
+        if (r < 0.35) return HM_C[2];
+        if (r < 0.65) return HM_C[3];
+        return HM_C[4];
+      }
+
+      const tooltip = document.getElementById('hm-tooltip');
+      let html = '<div class="hour-grid">';
+      // Header row: hour labels
+      html += '<div class="hour-day-label"></div>';
+      for (let h = 0; h < 24; h++) {
+        html += `<div class="hour-col-label">${h % 3 === 0 ? h : ''}</div>`;
+      }
+      // Data rows
+      for (let d = 0; d < 7; d++) {
+        html += `<div class="hour-day-label">${DAY_LABELS[d]}</div>`;
+        for (let h = 0; h < 24; h++) {
+          const hrs = grid[d][h];
+          html += `<div class="hour-cell" style="background:${hc(hrs)}" data-label="${DAY_LABELS[d]} ${h}:00" data-hours="${hrs.toFixed(2)}"></div>`;
+        }
+      }
+      html += '</div>';
+      container.innerHTML = html;
+
+      container.querySelectorAll('.hour-cell').forEach(cell => {
+        cell.addEventListener('mouseenter', e => {
+          const d = e.target.dataset;
+          tooltip.textContent = `${d.label} — ${d.hours}h`;
+          tooltip.style.display = 'block';
+        });
+        cell.addEventListener('mousemove', e => {
+          tooltip.style.left = (e.clientX + 12) + 'px';
+          tooltip.style.top = (e.clientY - 8) + 'px';
+        });
+        cell.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+      });
+    }
+
+    function _fmtSecs(secs) {
+      const mins = Math.round(secs / 60);
+      const h = Math.floor(mins / 60), m = mins % 60;
+      return h ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m`;
+    }
+
+    function _escHtml(str) {
+      return String(str).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+    }
+
+    function buildSessions(descriptions) {
+      const card = document.getElementById('sessions-card');
+      const container = document.getElementById('sessions-container');
+      if (!descriptions || descriptions.length === 0) { card.style.display = 'none'; return; }
+      card.style.display = '';
+
+      const statCard = (label, stats) => {
+        if (!stats || !stats.count) {
+          return `<div class="stat-card"><div class="label">${label}</div><div class="value">–</div></div>`;
+        }
+        return `<div class="stat-card">
+          <div class="label">${label}</div>
+          <div class="value">${_fmtSecs(stats.avg_secs)}</div>
+          <div class="deviation">${stats.count} sessions · ${_fmtSecs(stats.min_secs)}–${_fmtSecs(stats.max_secs)}</div>
+        </div>`;
+      };
+
+      container.innerHTML = descriptions.map(d => {
+        const weeks = d.weekly || [];
+        const maxCount = Math.max(1, ...weeks.map(w => w.count));
+        const bars = weeks.map(w => `<div title="${w.period}: ${w.count} × ${_fmtSecs(w.avg_secs)} avg"
+            style="flex:1;min-width:4px;background:#4A90D9;border-radius:2px 2px 0 0;
+                   height:${Math.round(w.count / maxCount * 100)}%"></div>`).join('');
+        return `<div style="margin-bottom:1.25rem">
+          <div style="color:#a0a8c0;font-size:0.9rem;margin-bottom:0.4rem">${_escHtml(d.description)}</div>
+          <div class="stats-row">
+            ${statCard('Last 4 weeks', d.last_4_weeks)}
+            ${statCard('Last 12 weeks', d.last_12_weeks)}
+            ${statCard('All time', d.all_time)}
+          </div>
+          ${weeks.length ? `<div style="display:flex;align-items:flex-end;gap:2px;height:48px;margin-top:0.75rem"
+               title="Sessions per week (last 26 weeks)">${bars}</div>` : ''}
+        </div>`;
+      }).join('');
+    }
+
+    async function loadData() {
+      const btn = document.getElementById('refreshBtn');
+      const tsEl = document.getElementById('lastRefreshed');
+      const errorBanner = document.getElementById('errorBanner');
+
+      btn.disabled = true;
+      btn.textContent = 'Loading…';
+      errorBanner.style.display = 'none';
+
+      try {
+        const [dataResp, heatmapResp, hoursResp, sessionsResp] = await Promise.all([
+          fetch('/api/data'),
+          fetch('/api/heatmap'),
+          fetch('/api/hours'),
+          fetch('/api/sessions'),
+        ]);
+        if (!dataResp.ok) throw new Error(`HTTP ${dataResp.status}`);
+        const data = await dataResp.json();
+        const heatmapData = heatmapResp.ok ? await heatmapResp.json() : { days: [] };
+        const hoursData = hoursResp.ok ? await hoursResp.json() : { slots: [] };
+        const sessionsData = sessionsResp.ok ? await sessionsResp.json() : { descriptions: [] };
+
+        const serverTargets = data.targets || {};
+        _localTargets = _loadLocalTargets();
+        // Merge: server-configured targets take precedence over local UI settings
+        _targets = { ..._localTargets, ...serverTargets };
+
+        _hidden = _loadHidden();
+        _projects = (data.projects || []).map((p, i) => ({
+          ...p, color: p.color || PALETTE[i % PALETTE.length],
+        }));
+
+        _rawData = data;
+        _heatmapDays = heatmapData.days || [];
+        _heatmapMeta = { last_entry_iso: heatmapData.last_entry_iso || null, daily_target: heatmapData.daily_target || null };
+
+        // Heatmap stats use raw heatmap data, unaffected by filter
+        buildHeatmapStats(_heatmapDays);
+        buildHeatmap(_heatmapDays);
+        buildHourGrid(hoursData.slots || []);
+        buildSessions(sessionsData.descriptions || []);
+        buildOverview(data, _heatmapDays);
+
+        renderAll();
+
+        tsEl.textContent = 'Last refreshed: ' + new Date().toLocaleTimeString();
+      } catch (err) {
+        errorBanner.innerHTML = `<div class="error-msg">Failed to load data: ${err.message}</div>`;
+        errorBanner.style.display = 'block';
+        tsEl.textContent = 'Refresh failed';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Refresh';
+      }
+    }
+
+    function _loadLocalTargets() {
+      try {
+        const raw = localStorage.getItem('toggl_weekly_targets');
+        if (!raw) return {};
+        const obj = JSON.parse(raw);
+        if (typeof obj === 'object' && obj !== null) return obj;
+      } catch (_) {}
+      return {};
+    }
+
+    function openSettings() {
+      const overlay = document.getElementById('settings-overlay');
+      overlay.style.display = 'flex';
+      const container = document.getElementById('settings-targets');
+      container.innerHTML = _projects.map(p => {
+        const pid = String(p.id);
+        // Show current local value; if server has a value, label it
+        const serverVal = (_rawData && _rawData.targets && _rawData.targets[pid] != null)
+          ? _rawData.targets[pid] : null;
+        const localVal = _localTargets[pid] ?? '';
+        const serverNote = serverVal != null
+          ? `<span style="font-size:0.72rem;color:#60677f;margin-left:0.5rem">server: ${serverVal}h</span>`
+          : '';
+        return `<div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.65rem">
+          <span style="display:inline-block;width:10px;height:10px;border-radius:50%;
+                        background:${p.color};flex-shrink:0"></span>
+          <label style="flex:1;font-size:0.88rem;color:#a0a8c0">${p.name}${serverNote}</label>
+          <input type="number" min="0" step="0.5" data-pid="${pid}"
+                 value="${localVal}"
+                 placeholder="h/week"
+                 style="width:72px;background:#0f1117;border:1px solid #2e3350;color:#e0e0e0;
+                        padding:0.35rem 0.5rem;border-radius:6px;font-size:0.85rem;outline:none;
+                        text-align:right">
+        </div>`;
+      }).join('');
+    }
+
+    function closeSettings() {
+      document.getElementById('settings-overlay').style.display = 'none';
+    }
+
+    function saveSettings() {
+      const inputs = document.querySelectorAll('#settings-targets input[data-pid]');
+      const saved = {};
+      inputs.forEach(inp => {
+        const v = parseFloat(inp.value);
+        if (!isNaN(v) && v > 0) saved[inp.dataset.pid] = v;
+      });
+      localStorage.setItem('toggl_weekly_targets', JSON.stringify(saved));
+      _localTargets = saved;
+      const serverTargets = (_rawData && _rawData.targets) || {};
+      _targets = { ..._localTargets, ...serverTargets };
+      closeSettings();
+      if (_rawData) buildOverview(_rawData, _heatmapDays);
+    }
+
+    loadData();
+  </script>
+</body>
+</html>
