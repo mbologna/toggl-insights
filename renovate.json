@@ -1,0 +1,18 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>mbologna/.github//renovate-config.json"],
+  "assignees": ["mbologna"],
+  "packageRules": [
+    {
+      "matchManagers": ["pip_requirements", "pyproject"],
+      "groupName": "Python dependencies",
+      "automerge": false
+    },
+    {
+      "matchManagers": ["dockerfile"],
+      "groupName": "Docker base images",
+      "automerge": false
+    }
+  ],
+  "ignorePaths": [".venv/**"]
+}

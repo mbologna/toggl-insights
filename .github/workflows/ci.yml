@@ -1,0 +1,61 @@
+name: CI
+
+"on":
+  push:
+    branches: ["**"]
+    tags: ["v*.*.*"]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+  security-events: write
+
+jobs:
+  python:
+    uses: mbologna/.github/.github/workflows/python-ci.yml@0436a70711b0ac798568028cba01d78e896e4075 # main
+    with:
+      python_version: "3.14"
+      use_uv: true
+      enable_codecov: false
+    secrets: inherit
+
+  docker:
+    needs: python
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@0436a70711b0ac798568028cba01d78e896e4075 # main
+    with:
+      image_name: toggl-insights
+      push_to_dockerhub: false
+      enable_cosign: true
+      enable_release_drafter: true
+    secrets: inherit
+
+  auto-release:
+    if: github.event_name == 'schedule'
+    needs: [docker]
+    # contents: push the tag; actions: dispatch this workflow on it, since a
+    # tag pushed with GITHUB_TOKEN triggers no run of its own.
+    permissions:
+      contents: write
+      actions: write
+    uses: mbologna/.github/.github/workflows/auto-release.yml@0436a70711b0ac798568028cba01d78e896e4075 # main
+    with:
+      strategy: commits
+    secrets: inherit
+
+  cache-cleanup:
+    if: github.event_name == 'schedule'
+    uses: mbologna/.github/.github/workflows/cache-cleanup.yml@0436a70711b0ac798568028cba01d78e896e4075 # main
+    with:
+      max_age_days: 7
+    permissions:
+      actions: write
