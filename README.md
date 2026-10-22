@@ -120,6 +120,13 @@ uv run ruff format --check .
 pre-commit run --all-files   # ruff, mypy, bandit, hadolint, etc.
 ```
 
+Dependencies resolve only to releases at least 7 days old (`exclude-newer` in
+`pyproject.toml`), and the Docker image installs exactly what `uv.lock` pins.
+To take a CVE fix released less than 7 days ago, add a temporary
+`exclude-newer-package = { <package> = false }` override under `[tool.uv]`,
+run `uv lock --upgrade-package <package>`, and drop the override once the
+release is a week old.
+
 ## Recurring activities
 
 Besides whole projects, everything also reports on *recurring activities*:

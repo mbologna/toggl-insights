@@ -13,6 +13,11 @@ dependencies = [
 
 [tool.uv]
 package = false
+required-version = ">=0.12.12"
+# Resolve only releases at least 7 days old (supply-chain cooldown). For an
+# urgent fix, temporarily add exclude-newer-package = { <name> = false } and
+# run `uv lock --upgrade-package <name>`.
+exclude-newer = "7 days"
 
 [dependency-groups]
 dev = [
