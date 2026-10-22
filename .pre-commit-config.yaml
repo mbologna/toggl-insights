@@ -40,6 +40,10 @@ repos:
     rev: v1.19.1
     hooks:
       - id: mypy
+        # mypy parses with the interpreter it runs on; the code uses Python
+        # 3.14 syntax (PEP 758: except A, B without parentheses), so an older
+        # default python reports a syntax error.
+        language_version: python3.14
         args: [--explicit-package-bases, --ignore-missing-imports]
         additional_dependencies:
           - types-requests
