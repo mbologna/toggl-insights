@@ -11,6 +11,10 @@ entries indefinitely — Toggl's own APIs only expose recent history on demand,
 so this project keeps its own append-only copy. A separate set of scheduled
 entrypoints sends weekly/monthly reports and a lapsed-habit nudge to [Apprise](https://github.com/caronc/apprise).
 
+![The Patterns tab: hours per weekday by project, and a time-of-day heatmap](docs/screenshot.png)
+
+*Generated, fictional data (`scripts/demo.py`).*
+
 ## Architecture
 
 ```
@@ -96,6 +100,10 @@ Dashboard: http://localhost:8000. The first boot kicks off a one-time
 historical backfill in a background thread (see `TOGGL_HISTORY_START_DATE`) —
 on the free tier's hourly quota this can take a while; `/health` stays green
 throughout (see below) and the dashboard serves whatever's already archived.
+
+To try the dashboard without a Toggl account, `uv run python scripts/demo.py`
+serves it on http://localhost:8000 from three years of made-up entries (no
+network calls); that's what the screenshot above shows.
 
 Run an alert entrypoint manually — these read whatever's already in
 `TOGGL_DB_PATH`, so the dashboard needs to have been running (and synced at
