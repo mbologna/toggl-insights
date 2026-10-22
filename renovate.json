@@ -2,25 +2,5 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["github>mbologna/.github//renovate-config.json"],
   "assignees": ["mbologna"],
-  "lockFileMaintenance": {
-    "description": "No lock file in this repo (the Dockerfile installs straight from pyproject.toml), so there is nothing to maintain.",
-    "enabled": false
-  },
-  "packageRules": [
-    {
-      "description": "pyproject.toml dependencies. The poetry manager supersedes pep621 for this file today (the dashboard lists them under poetry); pep621 stays so the group holds if that flips. commitMessageSuffix clears the preset's [automerge] tag.",
-      "matchManagers": ["pep621", "poetry"],
-      "groupName": "Python dependencies",
-      "automerge": false,
-      "labels": ["dependencies", "manual-review"]
-    },
-    {
-      "description": "commitMessageSuffix clears the preset's [automerge] tag.",
-      "matchManagers": ["dockerfile"],
-      "groupName": "Docker base images",
-      "automerge": false,
-      "labels": ["dependencies", "manual-review"]
-    }
-  ],
   "ignorePaths": [".venv/**"]
 }
