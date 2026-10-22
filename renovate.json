@@ -12,14 +12,14 @@
       "matchManagers": ["pep621", "poetry"],
       "groupName": "Python dependencies",
       "automerge": false,
-      "commitMessageSuffix": "[manual review]"
+      "labels": ["dependencies", "manual-review"]
     },
     {
       "description": "commitMessageSuffix clears the preset's [automerge] tag.",
       "matchManagers": ["dockerfile"],
       "groupName": "Docker base images",
       "automerge": false,
-      "commitMessageSuffix": "[manual review]"
+      "labels": ["dependencies", "manual-review"]
     }
   ],
   "ignorePaths": [".venv/**"]
