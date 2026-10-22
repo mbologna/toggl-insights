@@ -6,10 +6,13 @@ COPY --from=ghcr.io/astral-sh/uv:latest@sha256:61d393e44e249f2e4b526b6c7ddcecce2
 WORKDIR /app
 
 # Copy dependency files
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 
-# Install dependencies
-RUN uv pip install --system --no-cache -r pyproject.toml
+# Install the locked runtime dependencies with their hashes; --locked fails
+# the build if uv.lock no longer matches pyproject.toml
+RUN uv export --quiet --locked --no-dev --no-emit-project --no-header -o /tmp/requirements.txt \
+    && uv pip install --system --no-cache --require-hashes -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
 
 # Copy application code
 COPY src/ ./src/
