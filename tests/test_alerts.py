@@ -760,9 +760,7 @@ class TestRunSessionGapAlerts:
 
     def test_ignored_descriptions(self, monkeypatch):
         monkeypatch.setenv("TOGGL_IGNORED_DESCRIPTIONS", '["Yoga"]')
-        sent, _ = _run_entrypoint(
-            monkeypatch, run_session_gap_alerts, self._TODAY, described=self._yoga_until_jun_22()
-        )
+        sent, _ = _run_entrypoint(monkeypatch, run_session_gap_alerts, self._TODAY, described=self._yoga_until_jun_22())
         assert sent == []
 
     def test_nothing_tracked_collapses_to_sync_warning(self, monkeypatch):
