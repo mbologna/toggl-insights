@@ -254,6 +254,89 @@ class TogglReportsClient:
         return [{"period": p, "hours": round(h, 4)} for p, h in sorted(buckets.items())]
 
 
+class TogglWriteClient:
+    """The few Toggl writes src.cleanup needs. Kept apart from TogglReportsClient,
+    which the dashboard and alerts use and which never changes anything in Toggl.
+
+    Errors raise (after waiting out 402 quota limits like the reader does): a
+    cleanup run must stop at the first failed write, not carry on past it.
+    """
+
+    CREATED_WITH = "toggl-insights"
+
+    def __init__(self, api_token: str, workspace_id: int) -> None:
+        self.api_token = api_token
+        self.workspace_id = workspace_id
+
+    def _request(self, method: str, path: str, body: dict | None = None) -> dict | None:
+        for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+            response = requests.request(
+                method, f"{BASE_URL}{path}", json=body, auth=(self.api_token, "api_token"), timeout=DEFAULT_TIMEOUT
+            )
+            if response.status_code == 402 and attempt < RATE_LIMIT_MAX_RETRIES:
+                delay = _rate_limit_wait_seconds(response)
+                logger.warning(
+                    "Toggl rate limit reached. Retrying in %ds (%d/%d)...", delay, attempt + 1, RATE_LIMIT_MAX_RETRIES
+                )
+                time.sleep(delay)
+                continue
+            response.raise_for_status()
+            return response.json() if response.content else None
+        raise RuntimeError("unreachable: the last attempt always returns or raises")
+
+    def get_entry(self, entry_id: int) -> dict | None:
+        """The entry as Toggl has it, or None if it no longer exists."""
+        try:
+            entry = self._request("GET", f"/me/time_entries/{entry_id}")
+        except requests.exceptions.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return None
+            raise
+        if not entry:
+            raise RuntimeError(f"Toggl returned no time entry {entry_id}")
+        return entry
+
+    def delete_entry(self, entry_id: int) -> None:
+        self._request("DELETE", f"/workspaces/{self.workspace_id}/time_entries/{entry_id}")
+
+    def update_duration(self, entry_id: int, start: str, duration_secs: int) -> None:
+        """Keep the entry's start, set its duration (and the matching stop)."""
+        start_utc = _parse_iso(start).astimezone(UTC)
+        self._request(
+            "PUT",
+            f"/workspaces/{self.workspace_id}/time_entries/{entry_id}",
+            {
+                "start": _toggl_utc(start_utc),
+                "stop": _toggl_utc(start_utc + timedelta(seconds=duration_secs)),
+                "duration": duration_secs,
+            },
+        )
+
+    def create_entry(self, original: dict) -> dict:
+        """Re-create a deleted entry from the copy get_entry returned (it gets a new id)."""
+        body = {
+            "created_with": self.CREATED_WITH,
+            "workspace_id": self.workspace_id,
+            "start": _toggl_utc(_parse_iso(original["start"]).astimezone(UTC)),
+            "duration": original["duration"],
+        }
+        for key in ("project_id", "task_id", "description", "billable", "tag_ids"):
+            if original.get(key) is not None:
+                body[key] = original[key]
+        created = self._request("POST", f"/workspaces/{self.workspace_id}/time_entries", body)
+        if not created:
+            raise RuntimeError("Toggl returned no time entry for the re-created entry")
+        return created
+
+
+def _parse_iso(value: str) -> datetime:
+    return datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+
+
+def _toggl_utc(value: datetime) -> str:
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class TogglArchive:
     """SQLite-backed archive that accumulates time entries across API refreshes.
 
@@ -347,12 +430,13 @@ class TogglArchive:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
-                "SELECT description, start_iso, duration_secs FROM time_entries "
+                "SELECT id, description, start_iso, duration_secs FROM time_entries "
                 "WHERE description != '' AND start_iso >= ? AND duration_secs > 0 ORDER BY start_iso",
                 (since,),
             ).fetchall()
         return [
-            {"description": r["description"], "start": r["start_iso"], "duration": r["duration_secs"]} for r in rows
+            {"id": r["id"], "description": r["description"], "start": r["start_iso"], "duration": r["duration_secs"]}
+            for r in rows
         ]
 
     def ids_missing_from(self, start_day: str, end_day: str, present_ids: set[int]) -> list[int]:
@@ -382,6 +466,11 @@ class TogglArchive:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.executemany("DELETE FROM time_entries WHERE id = ?", [(i,) for i in ids])
         return cursor.rowcount
+
+    def set_duration(self, entry_id: int, duration_secs: int) -> None:
+        """Overwrite one archived entry's duration (after editing it in Toggl)."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("UPDATE time_entries SET duration_secs = ? WHERE id = ?", (duration_secs, entry_id))
 
     def has_missing_descriptions(self) -> bool:
         """True if any row predates the description column and was never re-fetched."""

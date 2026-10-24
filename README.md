@@ -69,15 +69,15 @@ Projects are discovered dynamically from Toggl (`GET /me/projects`, cached 24h)
 
 | Variable | Required | Default | Used by | Purpose |
 |---|---|---|---|---|
-| `TOGGL_API_TOKEN` | yes | — | both | Toggl API token (Profile → API Token) |
-| `TOGGL_WORKSPACE_ID` | yes | — | both | Numeric Toggl workspace ID |
+| `TOGGL_API_TOKEN` | yes | — | all | Toggl API token (Profile → API Token) |
+| `TOGGL_WORKSPACE_ID` | yes | — | all | Numeric Toggl workspace ID |
 | `APPRISE_URL` | yes (alerts only) | — | alerts | Apprise notify endpoint |
-| `TOGGL_DB_PATH` | no | `/data/toggl.db` | both | SQLite archive path |
+| `TOGGL_DB_PATH` | no | `/data/toggl.db` | all | SQLite archive path |
 | `TOGGL_HISTORY_START_DATE` | no | `2006-01-01` | dashboard | How far back the one-time backfill reaches |
 | `TOGGL_DAILY_TARGET_HOURS` | no | — | dashboard | Daily hours target shown on the Overview tab |
 | `TOGGL_WEEKLY_TARGETS` | no | `{}` | both | JSON map `{"project_id": hours}`, weekly per-project targets |
 | `TOGGL_YEARLY_GOALS` | no | `{}` | dashboard | JSON map `{"project_id": hours}`, annual goal tracking |
-| `TOGGL_IGNORED_DESCRIPTIONS` | no | `[]` | both | JSON list of entry descriptions never to treat as recurring (see below) |
+| `TOGGL_IGNORED_DESCRIPTIONS` | no | `[]` | all | JSON list of entry descriptions never to treat as recurring (see below) |
 | `TREND_ALERT_THRESHOLD` | no | `0.25` | alerts | Fractional change beyond which digest/report figures get a ↑/↓ marker (changes under 5% aren't shown) |
 | `TREND_ALERT_THRESHOLDS` | no | `{}` | alerts | JSON map `{"project_id": threshold}`, overrides the default per project |
 | `OVER_TARGET_THRESHOLD` | no | `0.5` | alerts | Fraction over `TOGGL_WEEKLY_TARGETS` that gets a ⚠ in the digest |
@@ -85,6 +85,10 @@ Projects are discovered dynamically from Toggl (`GET /me/projects`, cached 24h)
 | `ALERT_DRY_RUN` | no | — | alerts | Log alerts instead of sending them (cooldowns still update) |
 | `ALERT_TIMEZONE` | no | `UTC` | alerts | Timezone used to bucket entries into local days/weeks/months |
 | `APPRISE_CONNECT_TIMEOUT` / `APPRISE_READ_TIMEOUT` / `APPRISE_RETRIES` | no | `15` / `15` / `4` | alerts | Tuned for a cold cross-cluster Tailscale path between infrequent alert runs |
+| `CLEANUP_STUB_RATIO` / `CLEANUP_STUB_MIN_SECS` | no | `0.10` / `60` | cleanup | An entry shorter than this share of its activity's median, or than this many seconds, is a stub |
+| `CLEANUP_FRAGMENT_GAP_MINUTES` | no | `2` | cleanup | Longest pause (also capped at the median) between two entries that still counts as one restarted timer |
+| `CLEANUP_LONG_RATIO` / `CLEANUP_LONG_MIN_SECS` | no | `3` / `7200` | cleanup | An entry longer than both is reported as a forgotten timer |
+| `CLEANUP_BACKUP_PATH` | no | `cleanup-backup.jsonl` next to `TOGGL_DB_PATH` | cleanup | Backup log that `--restore` replays |
 
 See `.env.template` for a copy-pasteable starting point.
 
@@ -170,6 +174,37 @@ The archive stores each entry's description (added as a column in an
 in-place migration). Rows archived before that have a `NULL` description,
 which makes the dashboard re-run the historical backfill once on its next
 boot to fill them in.
+
+## Cleanup
+
+`python -m src.cleanup` finds suspicious entries of recurring activities.
+Each rule is relative to the activity's own median entry over the last 12
+weeks:
+
+- **Stub:** far shorter than usual, such as a timer started by mistake. It
+  is deleted.
+- **Fragment:** two or more same-day entries with at most a 2-minute pause
+  between them, such as a timer stopped and restarted, or a duplicate. They
+  are merged into the first entry. Its new duration is the time the entries
+  cover, so gaps are left out and overlaps count once.
+- **Forgotten timer:** far longer than usual. It is only reported, because
+  the real stop time is unknown.
+
+```bash
+python -m src.cleanup                        # report only (the default)
+python -m src.cleanup --rule stub --apply    # change Toggl and the archive
+python -m src.cleanup --restore 20261024T210000Z
+```
+
+`--since` (default: 90 days ago), `--description` (a substring) and `--limit`
+narrow a run. Today is never touched, because a timer may still be running.
+
+Toggl has no trash, so `--apply` first appends Toggl's own copy of every
+entry it changes to the backup log, and only then edits or deletes the entry.
+`--restore RUN_ID` replays the log: merged entries get their original
+duration back, and deleted ones are re-created with a new id. Each change is
+one or two API calls, and they count against the same hourly quota as the
+sync; on a 402 the run waits for the quota to reset.
 
 ## Notifications
 

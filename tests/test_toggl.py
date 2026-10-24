@@ -522,5 +522,5 @@ class TestGetDescribedEntries:
             ]
         )
         assert archive.get_described_entries(since="2026-05-01") == [
-            {"description": "Yoga", "start": "2026-06-01T10:00:00Z", "duration": 60}
+            {"id": 1, "description": "Yoga", "start": "2026-06-01T10:00:00Z", "duration": 60}
         ]
