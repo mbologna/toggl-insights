@@ -52,10 +52,11 @@ class TogglReportsClient:
 
     def _fetch_reports_page(
         self, start_date: str, end_date: str, cursor: dict | None = None
-    ) -> tuple[list[dict], dict | None]:
+    ) -> tuple[list[dict], dict | None, bool]:
         """One page of the Reports API's detailed search, flattened to this
         client's entry shape ({id, project_id, description, start, stop, duration}).
-        Returns (entries, next_cursor_or_None).
+        Returns (entries, next_cursor_or_None, ok); ok is False when the page
+        could not be fetched (errors are logged, never raised).
 
         Unlike /me/time_entries (capped at ~90 days on start_date/since/before,
         confirmed directly against the live API), this endpoint has no such
@@ -99,7 +100,7 @@ class TogglReportsClient:
                         "first_row_number": int(response.headers["x-next-row-number"]),
                         "first_timestamp": int(response.headers["x-next-timestamp"]),
                     }
-                return entries, next_cursor
+                return entries, next_cursor, True
             except requests.exceptions.HTTPError as exc:
                 is_rate_limited = exc.response is not None and exc.response.status_code == 402
                 if is_rate_limited and attempt < RATE_LIMIT_MAX_RETRIES:
@@ -113,40 +114,49 @@ class TogglReportsClient:
                     time.sleep(delay)
                     continue
                 logger.error("Failed to fetch Toggl entries: %s", exc)
-                return [], None
+                return [], None, False
             except requests.exceptions.RequestException as exc:
                 logger.error("Failed to fetch Toggl entries: %s", exc)
-                return [], None
-        return [], None
+                return [], None, False
+        return [], None, False
 
-    def _fetch_chunk(self, start_date: str, end_date: str) -> list[dict]:
-        """Fetch every entry in a single date range chunk (must be ≤366 days)."""
+    def _fetch_chunk(self, start_date: str, end_date: str) -> tuple[list[dict], bool]:
+        """Fetch every entry in a single date range chunk (must be ≤366 days).
+
+        Returns (entries, complete). A failed page ends the chunk early: the
+        entries are then only the pages before it, and complete is False.
+        """
         all_entries: list[dict] = []
         cursor = None
         while True:
-            entries, cursor = self._fetch_reports_page(start_date, end_date, cursor)
+            entries, cursor, ok = self._fetch_reports_page(start_date, end_date, cursor)
             all_entries.extend(entries)
+            if not ok:
+                return all_entries, False
             if cursor is None:
-                break
-        return all_entries
+                return all_entries, True
 
-    def _fetch_entries(self, start_date: str, end_date: str) -> list[dict]:
-        """Fetch all time entries in the date range, splitting into 366-day chunks."""
+    def _fetch_entries(self, start_date: str, end_date: str) -> tuple[list[dict], bool]:
+        """Fetch all time entries in the date range, splitting into 366-day chunks.
+
+        Returns (entries, complete), complete only if every chunk was.
+        """
         chunk_days = 366
         start = date.fromisoformat(start_date)
         end = date.fromisoformat(end_date)
         all_entries: list[dict] = []
+        all_complete = True
         chunk_start = start
         while chunk_start < end:
             chunk_end = min(chunk_start + timedelta(days=chunk_days), end)
-            all_entries.extend(
-                self._fetch_chunk(
-                    chunk_start.strftime("%Y-%m-%d"),
-                    chunk_end.strftime("%Y-%m-%d"),
-                )
+            entries, complete = self._fetch_chunk(
+                chunk_start.strftime("%Y-%m-%d"),
+                chunk_end.strftime("%Y-%m-%d"),
             )
+            all_entries.extend(entries)
+            all_complete = all_complete and complete
             chunk_start = chunk_end + timedelta(days=1)
-        return all_entries
+        return all_entries, all_complete
 
     def get_projects(self) -> list[dict]:
         """Return all active projects, cached for 24 hours."""
@@ -171,7 +181,13 @@ class TogglReportsClient:
 
     def fetch_raw(self, start_date: str, end_date: str) -> list[dict]:
         """Fetch all completed time entries in the date range (all projects, unfiltered)."""
-        return [e for e in self._fetch_entries(start_date, end_date) if e.get("stop")]
+        return self.fetch_window(start_date, end_date)[0]
+
+    def fetch_window(self, start_date: str, end_date: str) -> tuple[list[dict], bool]:
+        """fetch_raw plus whether every page arrived. Only a complete fetch can
+        tell an entry deleted in Toggl apart from one that just failed to load."""
+        entries, complete = self._fetch_entries(start_date, end_date)
+        return [e for e in entries if e.get("stop")], complete
 
     def get_project_hours(self, project_id: int, start_date: str, end_date: str) -> list[dict]:
         """Return time entries for a project in [start_date, end_date] (YYYY-MM-DD strings).
@@ -185,7 +201,7 @@ class TogglReportsClient:
             if now - cached_at < CACHE_TTL:
                 return cached_entries
 
-        all_entries = self._fetch_entries(start_date, end_date)
+        all_entries, _ = self._fetch_entries(start_date, end_date)
         filtered = [e for e in all_entries if e.get("project_id") == project_id and e.get("stop")]
         self._cache[key] = (now, filtered)
         return filtered
@@ -338,6 +354,34 @@ class TogglArchive:
         return [
             {"description": r["description"], "start": r["start_iso"], "duration": r["duration_secs"]} for r in rows
         ]
+
+    def ids_missing_from(self, start_day: str, end_day: str, present_ids: set[int]) -> list[int]:
+        """Archived ids that started on local days start_day..end_day (inclusive)
+        but are not in present_ids, i.e. no longer in Toggl if present_ids is a
+        complete fetch of that range."""
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT id FROM time_entries WHERE substr(start_iso, 1, 10) BETWEEN ? AND ? ORDER BY start_iso",
+                (start_day, end_day),
+            ).fetchall()
+        return [r[0] for r in rows if r[0] not in present_ids]
+
+    def count_entries_between(self, start_day: str, end_day: str) -> int:
+        """Number of archived entries that started on local days start_day..end_day (inclusive)."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM time_entries WHERE substr(start_iso, 1, 10) BETWEEN ? AND ?",
+                (start_day, end_day),
+            ).fetchone()
+        return row[0]
+
+    def delete_ids(self, ids: list[int]) -> int:
+        """Delete archived entries by Toggl id. Returns the number of rows removed."""
+        if not ids:
+            return 0
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.executemany("DELETE FROM time_entries WHERE id = ?", [(i,) for i in ids])
+        return cursor.rowcount
 
     def has_missing_descriptions(self) -> bool:
         """True if any row predates the description column and was never re-fetched."""

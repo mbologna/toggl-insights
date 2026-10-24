@@ -51,6 +51,9 @@ _SESSIONS_WEEKLY_HISTORY_WEEKS = 26
 # as stale.
 _last_sync_completed_at: float | None = None
 _STALE_SYNC_AFTER_SECONDS = 3 * _CACHE_TTL
+# Largest share of the synced window's archived entries a single sync may
+# delete as "gone from Toggl" (see _remove_deleted_entries).
+_RECONCILE_MAX_FRACTION = 0.2
 
 GRANULARITIES = ["daily", "weekly", "monthly", "yearly"]
 
@@ -68,15 +71,50 @@ def _get_client() -> TogglReportsClient:
 
 
 def _sync_archive_once() -> None:
-    """Fetch the latest 90-day window and upsert it into the archive."""
+    """Fetch the latest 90-day window, upsert it into the archive and drop
+    archived entries that were deleted in Toggl (see _remove_deleted_entries)."""
     global _last_sync_completed_at
     client = _get_client()
     archive = TogglArchive(_DB_PATH)
     start_date, end_date = date_range_for_granularity("daily")
-    raw = client.fetch_raw(start_date, end_date)
+    raw, complete = client.fetch_window(start_date, end_date)
     written = archive.upsert(raw)
     logger.info("Synced %d entries (%s → %s)", written, start_date, end_date)
+    if complete:
+        _remove_deleted_entries(archive, raw, start_date, end_date)
+    else:
+        logger.warning("Incomplete Toggl fetch: not checking for deleted entries this run")
     _last_sync_completed_at = time.monotonic()
+
+
+def _remove_deleted_entries(archive: TogglArchive, raw: list[dict], start_date: str, end_date: str) -> None:
+    """Delete archived entries in the synced window that Toggl no longer returns.
+
+    upsert alone never forgets, so an entry deleted in Toggl would count in
+    every stat forever. The window's first day is skipped: the API filters by
+    the user's timezone, so entries near that boundary may fall either side.
+    Refuses an empty fetch, or one that would remove more than
+    _RECONCILE_MAX_FRACTION of the window: that looks like an API anomaly, not
+    deletions, and the archive is the only copy of the history.
+    """
+    if not raw:
+        return
+    first_day = (date.fromisoformat(start_date) + timedelta(days=1)).isoformat()
+    missing = archive.ids_missing_from(first_day, end_date, {e["id"] for e in raw})
+    if not missing:
+        return
+    archived = archive.count_entries_between(first_day, end_date)
+    if len(missing) > _RECONCILE_MAX_FRACTION * archived:
+        logger.error(
+            "Toggl no longer returns %d of %d archived entries (%s → %s); not deleting them, check the workspace",
+            len(missing),
+            archived,
+            first_day,
+            end_date,
+        )
+        return
+    removed = archive.delete_ids(missing)
+    logger.info("Removed %d archived entries deleted in Toggl: %s", removed, missing)
 
 
 def _backfill_if_needed() -> None:

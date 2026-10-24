@@ -53,8 +53,9 @@ class TestFetchChunkRetry:
         ]
 
         with patch("requests.post", return_value=_reports_response(rows)):
-            result = client._fetch_chunk("2026-01-01", "2026-01-31")
+            result, complete = client._fetch_chunk("2026-01-01", "2026-01-31")
 
+        assert complete
         assert result == [
             {
                 "id": 1,
@@ -78,9 +79,10 @@ class TestFetchChunkRetry:
         page2 = _reports_response(row2)
 
         with patch("requests.post", side_effect=[page1, page2]) as mock_post:
-            result = client._fetch_chunk("2026-01-01", "2026-01-31")
+            result, complete = client._fetch_chunk("2026-01-01", "2026-01-31")
 
         assert [e["id"] for e in result] == [1, 2]
+        assert complete
         assert mock_post.call_count == 2
         second_body = mock_post.call_args_list[1].kwargs["json"]
         assert second_body["first_id"] == 2
@@ -95,9 +97,10 @@ class TestFetchChunkRetry:
         with patch("requests.post") as mock_post:
             mock_post.return_value.raise_for_status.side_effect = http_error
             with patch("time.sleep") as mock_sleep:
-                result = client._fetch_chunk("2026-01-01", "2026-01-31")
+                result, complete = client._fetch_chunk("2026-01-01", "2026-01-31")
 
         assert result == []
+        assert not complete
         assert mock_post.call_count == RATE_LIMIT_MAX_RETRIES + 1
         assert mock_sleep.call_count == RATE_LIMIT_MAX_RETRIES
 
@@ -114,9 +117,10 @@ class TestFetchChunkRetry:
 
         with patch("requests.post", side_effect=[rate_limited_response, success_response]):
             with patch("time.sleep") as mock_sleep:
-                result = client._fetch_chunk("2026-01-01", "2026-01-31")
+                result, complete = client._fetch_chunk("2026-01-01", "2026-01-31")
 
         assert [e["id"] for e in result] == [42]
+        assert complete
         mock_sleep.assert_called_once_with(RATE_LIMIT_RETRY_DELAY_SECONDS)
 
     def test_402_honors_toggl_quota_reset_header(self):
@@ -130,9 +134,10 @@ class TestFetchChunkRetry:
 
         with patch("requests.post", side_effect=[rate_limited_response, success_response]):
             with patch("time.sleep") as mock_sleep:
-                result = client._fetch_chunk("2026-01-01", "2026-01-31")
+                result, complete = client._fetch_chunk("2026-01-01", "2026-01-31")
 
         assert result == []
+        assert complete
         mock_sleep.assert_called_once_with(120 + RATE_LIMIT_RETRY_BUFFER_SECONDS)
 
     def test_non_402_http_error_returns_empty_without_retry(self):
@@ -143,9 +148,10 @@ class TestFetchChunkRetry:
         with patch("requests.post") as mock_post:
             mock_post.return_value.raise_for_status.side_effect = http_error
             with patch("time.sleep") as mock_sleep:
-                result = client._fetch_chunk("2026-01-01", "2026-01-31")
+                result, complete = client._fetch_chunk("2026-01-01", "2026-01-31")
 
         assert result == []
+        assert not complete
         assert mock_post.call_count == 1
         mock_sleep.assert_not_called()
 
@@ -155,10 +161,26 @@ class TestFetchChunkRetry:
 
         with patch("requests.post", side_effect=requests.exceptions.ConnectionError("boom")):
             with patch("time.sleep") as mock_sleep:
-                result = client._fetch_chunk("2026-01-01", "2026-01-31")
+                result, complete = client._fetch_chunk("2026-01-01", "2026-01-31")
 
         assert result == []
+        assert not complete
         mock_sleep.assert_not_called()
+
+    def test_failed_later_page_keeps_earlier_pages_but_is_incomplete(self):
+        client = self._make_client()
+        page1 = _reports_response(
+            [_row(456, [{"id": 1, "start": "2026-01-01T10:00:00Z", "stop": "2026-01-01T11:00:00Z", "seconds": 3600}])],
+            {"x-next-id": "2", "x-next-row-number": "2", "x-next-timestamp": "1700000000"},
+        )
+        page2 = Mock()
+        page2.raise_for_status.side_effect = _http_error(500)
+
+        with patch("requests.post", side_effect=[page1, page2]):
+            result, complete = client._fetch_chunk("2026-01-01", "2026-01-31")
+
+        assert [e["id"] for e in result] == [1]
+        assert not complete
 
 
 class TestFetchEntriesChunking:
@@ -167,7 +189,7 @@ class TestFetchEntriesChunking:
     def test_splits_multi_year_range_into_chunks(self):
         client = TogglReportsClient("token", 123)
 
-        with patch.object(client, "_fetch_chunk", return_value=[]) as mock_chunk:
+        with patch.object(client, "_fetch_chunk", return_value=([], True)) as mock_chunk:
             client._fetch_entries("2015-01-01", "2026-01-01")
 
         # 11 years at 366-day chunks: at least a handful of calls, each span <=366 days
@@ -178,6 +200,16 @@ class TestFetchEntriesChunking:
 
             span_days = (date.fromisoformat(end) - date.fromisoformat(start)).days
             assert span_days <= 366
+
+    def test_incomplete_if_any_chunk_is(self):
+        client = TogglReportsClient("token", 123)
+        chunks = [([{"id": 1}], True), ([], False), ([{"id": 2}], True)]
+
+        with patch.object(client, "_fetch_chunk", side_effect=chunks):
+            entries, complete = client._fetch_entries("2024-01-01", "2026-12-31")
+
+        assert [e["id"] for e in entries] == [1, 2]
+        assert not complete
 
 
 class TestTogglArchiveEarliestEntryTime:
@@ -260,7 +292,7 @@ class TestFetchDescription:
         ]
 
         with patch("requests.post", return_value=_reports_response(rows)):
-            result = client._fetch_chunk("2026-01-01", "2026-01-31")
+            result, complete = client._fetch_chunk("2026-01-01", "2026-01-31")
 
         assert [e["description"] for e in result] == ["Yoga", "Yoga"]
 

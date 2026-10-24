@@ -116,6 +116,57 @@ class TestBackfillIfNeeded:
         assert archive.has_missing_descriptions()
 
 
+def _archived(entry_id: int, day: str) -> dict:
+    return {"id": entry_id, "project_id": 1, "start": f"{day}T10:00:00+02:00", "stop": "x", "duration": 600}
+
+
+class TestSyncArchiveOnce:
+    """The hourly sync also drops archived entries that Toggl no longer returns."""
+
+    def _sync(self, tmp_path, monkeypatch, archived: list[dict], fetched: list[dict], complete: bool = True):
+        db_path = str(tmp_path / "toggl.db")
+        monkeypatch.setattr(main, "_DB_PATH", db_path)
+        archive = TogglArchive(db_path)
+        archive.upsert(archived)
+        fake_client = Mock()
+        fake_client.fetch_window.return_value = (fetched, complete)
+        monkeypatch.setattr(main, "_get_client", lambda: fake_client)
+        with patch.object(main, "date_range_for_granularity", return_value=("2026-07-26", "2026-10-24")):
+            main._sync_archive_once()
+        with sqlite3.connect(db_path) as conn:
+            return sorted(r[0] for r in conn.execute("SELECT id FROM time_entries"))
+
+    def test_removes_entries_deleted_in_toggl(self, tmp_path, monkeypatch):
+        kept = [_archived(i, "2026-10-01") for i in range(1, 11)]
+        ids = self._sync(tmp_path, monkeypatch, [*kept, _archived(99, "2026-10-02")], kept)
+        assert ids == list(range(1, 11))
+
+    def test_keeps_entries_outside_the_window_and_on_its_first_day(self, tmp_path, monkeypatch):
+        kept = [_archived(i, "2026-10-01") for i in range(1, 11)]
+        old = [_archived(50, "2025-01-01"), _archived(51, "2026-07-26")]
+        ids = self._sync(tmp_path, monkeypatch, [*kept, *old], kept)
+        assert ids == [*range(1, 11), 50, 51]
+
+    def test_nothing_removed_after_an_incomplete_fetch(self, tmp_path, monkeypatch):
+        archived = [_archived(i, "2026-10-01") for i in range(1, 11)]
+        ids = self._sync(tmp_path, monkeypatch, archived, archived[:5], complete=False)
+        assert ids == list(range(1, 11))
+
+    def test_nothing_removed_after_an_empty_fetch(self, tmp_path, monkeypatch):
+        archived = [_archived(i, "2026-10-01") for i in range(1, 11)]
+        assert self._sync(tmp_path, monkeypatch, archived, []) == list(range(1, 11))
+
+    def test_refuses_to_remove_a_large_share_of_the_window(self, tmp_path, monkeypatch):
+        archived = [_archived(i, "2026-10-01") for i in range(1, 11)]
+        ids = self._sync(tmp_path, monkeypatch, archived, archived[:7])
+        assert ids == list(range(1, 11))
+
+    def test_marks_sync_completed_even_when_incomplete(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(main, "_last_sync_completed_at", None)
+        self._sync(tmp_path, monkeypatch, [], [], complete=False)
+        assert main._last_sync_completed_at is not None
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """A TestClient wired to an isolated, empty archive with module caches reset."""
