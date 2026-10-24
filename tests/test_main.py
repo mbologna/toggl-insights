@@ -1,7 +1,7 @@
 """Unit tests for src.main's one-time historical backfill and HTTP endpoints."""
 
 import sqlite3
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import Mock, patch
 
 import pytest
@@ -262,6 +262,84 @@ class TestApiSessions:
         assert yoga["last_12_weeks"]["count"] == 6
         assert yoga["all_time"]["count"] == 7
         assert yoga["weekly"][-1] == {"period": "2026-W26", "count": 2, "avg_secs": 3600}
+
+
+class TestApiSessionsTypical:
+    @staticmethod
+    def _entry(entry_id: int, description: str, day: date, duration: int, hour: int = 13) -> dict:
+        return {
+            "id": entry_id,
+            "project_id": 1,
+            "description": description,
+            "start": f"{day.isoformat()}T{hour:02d}:00:00+02:00",
+            "stop": "x",
+            "duration": duration,
+        }
+
+    def test_median_of_visits(self, tmp_path):
+        archive = TogglArchive(str(tmp_path / "toggl.db"))
+        today = date(2026, 10, 24)
+        rows = [
+            self._entry(1, "🧘 Yoga", date(2026, 10, 21), 9000),
+            self._entry(2, "🧘 Yoga", date(2026, 10, 19), 8000),
+            # restarted timer: same visit as entry 2
+            self._entry(3, "🧘 Yoga", date(2026, 10, 19), 1000, hour=16),
+            # short day: moves the mean, not the median
+            self._entry(4, "🧘 Yoga", date(2026, 10, 2), 3000),
+            # today, still in progress
+            self._entry(5, "🧘 Yoga", today, 60),
+            # before the 4-week window
+            self._entry(6, "🧘 Yoga", date(2026, 9, 25), 100),
+            self._entry(7, "Spanish", date(2026, 10, 21), 600),
+        ]
+        archive.upsert(rows)
+
+        data = main._build_typical_session(archive, "YOGA", 4, today)
+
+        assert data == {
+            "description": "🧘 Yoga",
+            "weeks": 4,
+            "since": "2026-09-26",
+            "until": "2026-10-23",
+            "visits": 3,
+            "minutes": 150,
+            "median_secs": 9000,
+            "avg_secs": 7000,
+            "min_secs": 3000,
+            "max_secs": 9000,
+        }
+
+    def test_window_start_is_inclusive(self, tmp_path):
+        archive = TogglArchive(str(tmp_path / "toggl.db"))
+        archive.upsert([self._entry(1, "Yoga", date(2026, 10, 17), 3600)])
+        assert main._build_typical_session(archive, "yoga", 1, date(2026, 10, 24))["visits"] == 1
+        with pytest.raises(main.HTTPException) as exc:
+            main._build_typical_session(archive, "yoga", 1, date(2026, 10, 25))
+        assert exc.value.status_code == 404
+
+    def test_404_when_nothing_matches(self, client):
+        resp = client.get("/api/sessions/typical", params={"description": "yoga"})
+        assert resp.status_code == 404
+
+    def test_409_when_ambiguous(self, client):
+        yesterday = date.today() - timedelta(days=1)
+        TogglArchive(main._DB_PATH).upsert(
+            [self._entry(1, "Yoga flow", yesterday, 3600), self._entry(2, "Yoga stretch", yesterday, 3600)]
+        )
+        resp = client.get("/api/sessions/typical", params={"description": "yoga"})
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["matches"] == ["Yoga flow", "Yoga stretch"]
+
+    def test_endpoint(self, client):
+        yesterday = date.today() - timedelta(days=1)
+        TogglArchive(main._DB_PATH).upsert([self._entry(1, "Yoga", yesterday, 5400)])
+        resp = client.get("/api/sessions/typical", params={"description": "yoga", "weeks": 2})
+        assert resp.status_code == 200
+        assert resp.json()["minutes"] == 90
+
+    def test_rejects_bad_weeks(self, client):
+        assert client.get("/api/sessions/typical", params={"description": "yoga", "weeks": 0}).status_code == 422
+        assert client.get("/api/sessions/typical", params={"description": "yoga", "weeks": 53}).status_code == 422
 
 
 class TestDashboard:

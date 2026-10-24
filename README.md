@@ -155,6 +155,17 @@ want reported or nudged with `TOGGL_IGNORED_DESCRIPTIONS='["Chores"]'`.
 12 weeks and all time, plus a per-ISO-week series for the last 26 weeks, for
 each one — shown in the "Recurring" card on the dashboard's Patterns tab.
 
+`/api/sessions/typical?description=yoga&weeks=4` answers "how long does this
+usually take?" for one description, for scripts and phone automations that
+need a single number. `description` is a case-insensitive substring (so emoji
+can be left out). Same-day entries are summed into one visit, so a timer
+restarted by mistake counts once. Today is excluded, because it is usually
+still in progress. `minutes` is the median visit over the last `weeks` (1–52,
+default 4). The median is used because one short or forgotten-timer day barely
+moves it. The response also carries the visit count and the mean, min and max.
+The endpoint returns 404 when nothing matches in the window, and 409 with the
+candidate list when the substring matches more than one description.
+
 The archive stores each entry's description (added as a column in an
 in-place migration). Rows archived before that have a `NULL` description,
 which makes the dashboard re-run the historical backfill once on its next

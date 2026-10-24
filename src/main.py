@@ -6,9 +6,10 @@ import os
 import threading
 import time
 from datetime import date, timedelta
+from typing import Annotated
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 
 from src.toggl import (
@@ -18,6 +19,7 @@ from src.toggl import (
     date_range_for_granularity,
     recurring_descriptions,
     session_stats,
+    visit_stats,
 )
 
 logger = logging.getLogger(__name__)
@@ -346,6 +348,53 @@ def api_sessions() -> dict:
     data = _build_sessions_data(TogglArchive(_DB_PATH), date.today())
     _sessions_cache = (now, data)
     return data
+
+
+def _build_typical_session(archive: TogglArchive, query: str, weeks: int, today: date) -> dict:
+    """Typical length of one description's visits over the last `weeks` full weeks.
+
+    `query` is a case-insensitive substring of the description, so callers that
+    can't easily send emoji (an iOS Shortcut) can pass a plain word. Today is left
+    out: it is usually still in progress. Raises 404 when nothing matches and 409
+    when the substring matches more than one description.
+    """
+    since = today - timedelta(weeks=weeks)
+    entries = [
+        e
+        for e in archive.get_described_entries(since=since.isoformat())
+        if since <= TogglReportsClient._entry_date(e) < today
+    ]
+    needle = query.casefold()
+    matches = sorted({e["description"] for e in entries if needle in e["description"].casefold()})
+    if not matches:
+        raise HTTPException(status_code=404, detail=f"no entries matching {query!r} in the last {weeks} weeks")
+    if len(matches) > 1:
+        raise HTTPException(
+            status_code=409, detail={"error": f"{query!r} matches several descriptions", "matches": matches}
+        )
+
+    (description,) = matches
+    stats = visit_stats([e for e in entries if e["description"] == description])
+    return {
+        "description": description,
+        "weeks": weeks,
+        "since": since.isoformat(),
+        "until": (today - timedelta(days=1)).isoformat(),
+        "visits": stats["count"],
+        "minutes": round(stats["median_secs"] / 60),
+        "median_secs": stats["median_secs"],
+        "avg_secs": stats["avg_secs"],
+        "min_secs": stats["min_secs"],
+        "max_secs": stats["max_secs"],
+    }
+
+
+@app.get("/api/sessions/typical")
+def api_sessions_typical(
+    description: Annotated[str, Query(min_length=1)],
+    weeks: Annotated[int, Query(ge=1, le=52)] = 4,
+) -> dict:
+    return _build_typical_session(TogglArchive(_DB_PATH), description, weeks, date.today())
 
 
 @app.get("/", response_class=FileResponse)

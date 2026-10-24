@@ -18,6 +18,7 @@ from src.toggl import (
     recurring_descriptions,
     session_stats,
     sparkline,
+    visit_stats,
 )
 
 
@@ -350,6 +351,30 @@ class TestSessionStats:
             "min_secs": 1800,
             "max_secs": 5400,
         }
+
+
+class TestVisitStats:
+    def test_sums_same_day_entries_into_one_visit(self):
+        entries = [
+            {"start": "2026-06-01T18:00:00+02:00", "duration": 3000},
+            {"start": "2026-06-01T19:00:00+02:00", "duration": 600},
+            {"start": "2026-06-03T18:00:00+02:00", "duration": 3300},
+        ]
+        stats = visit_stats(entries)
+        assert stats["count"] == 2
+        assert stats["max_secs"] == 3600
+        assert stats["min_secs"] == 3300
+
+    def test_groups_by_local_day_not_utc(self):
+        # 00:30 local on the 2nd is still the 1st in UTC
+        entries = [
+            {"start": "2026-06-01T22:00:00+02:00", "duration": 600},
+            {"start": "2026-06-02T00:30:00+02:00", "duration": 600},
+        ]
+        assert visit_stats(entries)["count"] == 2
+
+    def test_ignores_zero_length_entries(self):
+        assert visit_stats([{"start": "2026-06-01T10:00:00Z", "duration": 0}]) == {"count": 0}
 
 
 class TestFormatDuration:

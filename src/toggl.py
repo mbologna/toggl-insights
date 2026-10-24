@@ -545,6 +545,18 @@ def session_stats(entries: list[dict]) -> dict:
     }
 
 
+def visit_stats(entries: list[dict]) -> dict:
+    """session_stats over visits instead of entries: a visit is the summed duration
+    of the given entries on one local day, so a timer split into several entries
+    (or stopped and restarted by mistake) still counts once at its full length."""
+    totals: dict[date, int] = {}
+    for entry in entries:
+        if entry.get("duration", 0) > 0:
+            day = TogglReportsClient._entry_date(entry)
+            totals[day] = totals.get(day, 0) + entry["duration"]
+    return session_stats([{"duration": total} for total in totals.values()])
+
+
 def format_duration(seconds: int) -> str:
     """Format seconds as "1h 05m" (or "45m" under an hour)."""
     hours, minutes = divmod(round(seconds / 60), 60)
