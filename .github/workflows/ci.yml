@@ -40,7 +40,12 @@ jobs:
     secrets: inherit
 
   auto-release:
-    if: github.event_name == 'schedule'
+    # Weekly with 'commits', for whatever piled up (Renovate's chore(deps) bumps
+    # included), and on every push to main with 'conventional', which releases only
+    # when a feat, fix, perf, revert or breaking commit landed since the last tag:
+    # a user-facing change ships without waiting for Monday, while each dependency
+    # bump alone doesn't cost an image bump in infra.
+    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     needs: [docker]
     # contents: push the tag; actions: dispatch this workflow on it, since a
     # tag pushed with GITHUB_TOKEN triggers no run of its own.
@@ -49,7 +54,7 @@ jobs:
       actions: write
     uses: mbologna/.github/.github/workflows/auto-release.yml@63deea7f993150cc855466e01c72747becb8211d # main
     with:
-      strategy: commits
+      strategy: ${{ github.event_name == 'schedule' && 'commits' || 'conventional' }}
     secrets: inherit
 
   cache-cleanup:
