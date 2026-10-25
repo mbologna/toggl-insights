@@ -19,6 +19,7 @@ REPORTS_BASE_URL = "https://api.track.toggl.com/reports/api/v3"
 DEFAULT_TIMEOUT = (3.05, 10)
 CACHE_TTL = 3600  # 1 hour
 RATE_LIMIT_MAX_RETRIES = 3
+REPORTS_PAGE_SIZE = 1000
 RATE_LIMIT_RETRY_DELAY_SECONDS = 30  # fallback when Toggl doesn't send a reset hint
 RATE_LIMIT_RETRY_BUFFER_SECONDS = 2
 # Toggl's per-second leaky bucket (HTTP 429): its documented safe pace is 1 request/s.
@@ -55,21 +56,19 @@ class TogglReportsClient:
     def _cache_key(self, project_id: int, start_date: str, end_date: str) -> str:
         return f"{project_id}:{start_date}:{end_date}"
 
-    def _fetch_reports_page(
-        self, start_date: str, end_date: str, cursor: dict | None = None
-    ) -> tuple[list[dict], dict | None, bool]:
-        """One page of the Reports API's detailed search, flattened to this
+    def _fetch_reports_page(self, start_date: str, end_date: str) -> tuple[list[dict], bool, bool]:
+        """First page of the Reports API's detailed search, flattened to this
         client's entry shape ({id, project_id, description, start, stop, duration}).
-        Returns (entries, next_cursor_or_None, ok); ok is False when the page
-        could not be fetched (errors are logged, never raised).
+        Returns (entries, truncated, ok): truncated when more entries matched
+        than one page holds; ok is False when the page could not be fetched
+        (errors are logged, never raised).
 
         Unlike /me/time_entries (capped at ~90 days on start_date/since/before,
         confirmed directly against the live API), this endpoint has no such
-        floor — only a 366-day span per request, enforced by the caller.
+        floor — only a 366-day span per request, enforced by the caller. Both
+        dates are inclusive and start_date must be before end_date.
         """
-        body = {"start_date": start_date, "end_date": end_date, "page_size": 1000}
-        if cursor:
-            body.update(cursor)
+        body = {"start_date": start_date, "end_date": end_date, "page_size": REPORTS_PAGE_SIZE}
 
         for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
             try:
@@ -97,15 +96,7 @@ class TogglReportsClient:
                             }
                         )
 
-                next_id = response.headers.get("x-next-id")
-                next_cursor = None
-                if next_id is not None:
-                    next_cursor = {
-                        "first_id": int(next_id),
-                        "first_row_number": int(response.headers["x-next-row-number"]),
-                        "first_timestamp": int(response.headers["x-next-timestamp"]),
-                    }
-                return entries, next_cursor, True
+                return entries, response.headers.get("x-next-id") is not None, True
             except requests.exceptions.HTTPError as exc:
                 is_rate_limited = exc.response is not None and exc.response.status_code == 402
                 if is_rate_limited and attempt < RATE_LIMIT_MAX_RETRIES:
@@ -119,49 +110,59 @@ class TogglReportsClient:
                     time.sleep(delay)
                     continue
                 logger.error("Failed to fetch Toggl entries: %s", exc)
-                return [], None, False
+                return [], False, False
             except requests.exceptions.RequestException as exc:
                 logger.error("Failed to fetch Toggl entries: %s", exc)
-                return [], None, False
-        return [], None, False
+                return [], False, False
+        return [], False, False
 
     def _fetch_chunk(self, start_date: str, end_date: str) -> tuple[list[dict], bool]:
-        """Fetch every entry in a single date range chunk (must be ≤366 days).
+        """Fetch every entry in one date range (≤367 days). Returns (entries, complete).
 
-        Returns (entries, complete). A failed page ends the chunk early: the
-        entries are then only the pages before it, and complete is False.
+        Never follows the API's next-page cursor (the X-Next-* headers fed back
+        as first_id/first_row_number/first_timestamp): it skips entries. Checked
+        live on 2026-10-25, page 2 of a 13-month range began five months after
+        page 1 ended, with or without an explicit order_by/order_dir, so every
+        fetch of more than one page had silently lost months of history. A
+        range that doesn't fit one page is instead split in half, and each half
+        fetched the same way, until every request fits.
         """
-        all_entries: list[dict] = []
-        cursor = None
-        while True:
-            entries, cursor, ok = self._fetch_reports_page(start_date, end_date, cursor)
-            all_entries.extend(entries)
-            if not ok:
-                return all_entries, False
-            if cursor is None:
-                return all_entries, True
+        entries, truncated, ok = self._fetch_reports_page(start_date, end_date)
+        if not ok:
+            return [], False
+        if not truncated:
+            return entries, True
+        start, end = date.fromisoformat(start_date), date.fromisoformat(end_date)
+        # Both halves must keep start < end: a span under 3 days can't split.
+        if (end - start).days < 3:
+            logger.error("More than %d Toggl entries between %s and %s", REPORTS_PAGE_SIZE, start_date, end_date)
+            return entries, False
+        mid = start + (end - start) // 2
+        first, first_complete = self._fetch_chunk(start.isoformat(), mid.isoformat())
+        second, second_complete = self._fetch_chunk((mid + timedelta(days=1)).isoformat(), end_date)
+        return first + second, first_complete and second_complete
 
     def _fetch_entries(self, start_date: str, end_date: str) -> tuple[list[dict], bool]:
         """Fetch all time entries in the date range, splitting into 366-day chunks.
 
-        Returns (entries, complete), complete only if every chunk was.
+        Returns (entries, complete), complete only if every chunk was. A last
+        chunk of a single day is asked for together with the day before (the
+        API needs start_date < end_date); entries are de-duplicated by id.
         """
         chunk_days = 366
         start = date.fromisoformat(start_date)
         end = date.fromisoformat(end_date)
-        all_entries: list[dict] = []
+        by_id: dict[int, dict] = {}
         all_complete = True
         chunk_start = start
-        while chunk_start < end:
+        while chunk_start <= end:
             chunk_end = min(chunk_start + timedelta(days=chunk_days), end)
-            entries, complete = self._fetch_chunk(
-                chunk_start.strftime("%Y-%m-%d"),
-                chunk_end.strftime("%Y-%m-%d"),
-            )
-            all_entries.extend(entries)
+            query_start = chunk_start if chunk_start < chunk_end else chunk_start - timedelta(days=1)
+            entries, complete = self._fetch_chunk(query_start.isoformat(), chunk_end.isoformat())
+            by_id.update((e["id"], e) for e in entries)
             all_complete = all_complete and complete
             chunk_start = chunk_end + timedelta(days=1)
-        return all_entries, all_complete
+        return list(by_id.values()), all_complete
 
     def get_projects(self) -> list[dict]:
         """Return all active projects, cached for 24 hours."""

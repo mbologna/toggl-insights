@@ -68,27 +68,40 @@ class TestFetchChunkRetry:
             }
         ]
 
-    def test_paginates_using_next_headers(self):
+    def test_splits_a_range_that_does_not_fit_one_page(self):
+        """The API's next-page cursor skips entries, so a truncated range is split in half instead."""
         client = self._make_client()
-        row1 = [
-            _row(456, [{"id": 1, "start": "2026-01-01T10:00:00Z", "stop": "2026-01-01T11:00:00Z", "seconds": 3600}])
-        ]
-        row2 = [
-            _row(456, [{"id": 2, "start": "2026-01-02T10:00:00Z", "stop": "2026-01-02T11:00:00Z", "seconds": 3600}])
-        ]
-        page1 = _reports_response(row1, {"x-next-id": "2", "x-next-row-number": "2", "x-next-timestamp": "1700000000"})
-        page2 = _reports_response(row2)
+        truncated = _reports_response(
+            [_row(456, [{"id": 9, "start": "2026-01-01T10:00:00Z", "stop": "2026-01-01T11:00:00Z", "seconds": 3600}])],
+            {"x-next-id": "2", "x-next-row-number": "2", "x-next-timestamp": "1700000000"},
+        )
+        first_half = _reports_response(
+            [_row(456, [{"id": 1, "start": "2026-01-02T10:00:00Z", "stop": "2026-01-02T11:00:00Z", "seconds": 3600}])]
+        )
+        second_half = _reports_response(
+            [_row(456, [{"id": 2, "start": "2026-01-20T10:00:00Z", "stop": "2026-01-20T11:00:00Z", "seconds": 3600}])]
+        )
 
-        with patch("requests.post", side_effect=[page1, page2]) as mock_post:
+        with patch("requests.post", side_effect=[truncated, first_half, second_half]) as mock_post:
             result, complete = client._fetch_chunk("2026-01-01", "2026-01-31")
 
+        # the truncated page's entries are not used: each half re-fetches its own
         assert [e["id"] for e in result] == [1, 2]
         assert complete
-        assert mock_post.call_count == 2
-        second_body = mock_post.call_args_list[1].kwargs["json"]
-        assert second_body["first_id"] == 2
-        assert second_body["first_row_number"] == 2
-        assert second_body["first_timestamp"] == 1700000000
+        bodies = [c.kwargs["json"] for c in mock_post.call_args_list]
+        assert [(b["start_date"], b["end_date"]) for b in bodies] == [
+            ("2026-01-01", "2026-01-31"),
+            ("2026-01-01", "2026-01-16"),
+            ("2026-01-17", "2026-01-31"),
+        ]
+        assert all("first_id" not in b for b in bodies)
+
+    def test_range_too_short_to_split_is_incomplete(self):
+        client = self._make_client()
+        truncated = _reports_response([], {"x-next-id": "2", "x-next-row-number": "2", "x-next-timestamp": "1"})
+        with patch("requests.post", return_value=truncated):
+            _, complete = client._fetch_chunk("2026-01-01", "2026-01-03")
+        assert not complete
 
     def test_402_retries_then_gives_up_returning_empty(self):
         """Persistent 402s are retried with backoff, then return [] rather than raising."""
@@ -168,16 +181,16 @@ class TestFetchChunkRetry:
         assert not complete
         mock_sleep.assert_not_called()
 
-    def test_failed_later_page_keeps_earlier_pages_but_is_incomplete(self):
+    def test_failed_half_makes_the_range_incomplete(self):
         client = self._make_client()
-        page1 = _reports_response(
-            [_row(456, [{"id": 1, "start": "2026-01-01T10:00:00Z", "stop": "2026-01-01T11:00:00Z", "seconds": 3600}])],
-            {"x-next-id": "2", "x-next-row-number": "2", "x-next-timestamp": "1700000000"},
+        truncated = _reports_response([], {"x-next-id": "2", "x-next-row-number": "2", "x-next-timestamp": "1"})
+        first_half = _reports_response(
+            [_row(456, [{"id": 1, "start": "2026-01-02T10:00:00Z", "stop": "2026-01-02T11:00:00Z", "seconds": 3600}])]
         )
-        page2 = Mock()
-        page2.raise_for_status.side_effect = _http_error(500)
+        failed = Mock()
+        failed.raise_for_status.side_effect = _http_error(500)
 
-        with patch("requests.post", side_effect=[page1, page2]):
+        with patch("requests.post", side_effect=[truncated, first_half, failed]):
             result, complete = client._fetch_chunk("2026-01-01", "2026-01-31")
 
         assert [e["id"] for e in result] == [1]
@@ -201,6 +214,19 @@ class TestFetchEntriesChunking:
 
             span_days = (date.fromisoformat(end) - date.fromisoformat(start)).days
             assert span_days <= 366
+
+    def test_last_single_day_is_fetched_with_the_day_before(self):
+        client = TogglReportsClient("token", 123)
+        chunks = [([{"id": 1}], True), ([{"id": 1}, {"id": 2}], True)]
+        with patch.object(client, "_fetch_chunk", side_effect=chunks) as mock_chunk:
+            # 2026-01-01 + 366 days = 2027-01-02, leaving 2027-01-03 alone
+            entries, complete = client._fetch_entries("2026-01-01", "2027-01-03")
+        assert [c.args for c in mock_chunk.call_args_list] == [
+            ("2026-01-01", "2027-01-02"),
+            ("2027-01-02", "2027-01-03"),
+        ]
+        assert sorted(e["id"] for e in entries) == [1, 2]
+        assert complete
 
     def test_incomplete_if_any_chunk_is(self):
         client = TogglReportsClient("token", 123)
