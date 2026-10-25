@@ -4,7 +4,7 @@ Usage:
     python -m src.cleanup                        # report only: list what would change
     python -m src.cleanup --apply [--limit N]    # change it in Toggl and the archive
     python -m src.cleanup --restore RUN_ID       # undo an --apply run
-    options: --since YYYY-MM-DD (default: 90 days ago), --description SUBSTRING,
+    options: --since YYYY-MM-DD (default: 90 days ago), --description WORDS,
              --rule stub|fragment (only that rule)
 
 Three rules, each relative to the description's own median entry length over
@@ -45,6 +45,7 @@ from src.toggl import (  # noqa: E402
     TogglWriteClient,
     _parse_iso,
     format_duration,
+    match_descriptions,
     recurring_descriptions,
     session_stats,
 )
@@ -185,8 +186,9 @@ def collect(
     Today is left out: a timer split today may still be running."""
     median_since = today - timedelta(weeks=_MEDIAN_WEEKS)
     recent = archive.get_described_entries(since=min(since, median_since).isoformat())
-    needle = (description_filter or "").casefold()
-    descriptions = [d for d in recurring_descriptions(recent, today, REPORT_ROUTINES) if needle in d.casefold()]
+    descriptions = recurring_descriptions(recent, today, REPORT_ROUTINES)
+    if description_filter:
+        descriptions = match_descriptions(description_filter, descriptions)
 
     entries_by_description: dict[str, list[dict]] = {}
     medians: dict[str, int] = {}
@@ -339,7 +341,7 @@ def restore(run_id: str, writer: TogglWriteClient, archive: TogglArchive, log: B
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--since", type=date.fromisoformat, help="first day to scan (default: 90 days ago)")
-    parser.add_argument("--description", help="only descriptions containing this (case-insensitive)")
+    parser.add_argument("--description", help="only matching descriptions (case, emoji and punctuation ignored)")
     parser.add_argument("--apply", action="store_true", help="change Toggl and the archive (default: report only)")
     parser.add_argument("--rule", choices=[STUB, FRAGMENT, LONG], help="only findings of this rule")
     parser.add_argument("--limit", type=int, help="apply at most this many findings")

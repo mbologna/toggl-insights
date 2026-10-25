@@ -3,9 +3,11 @@
 import json
 import logging
 import os
+import re
 import sqlite3
 import statistics
 import time
+from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 
 import requests
@@ -606,6 +608,20 @@ def date_range_for_granularity(granularity: str, now: date | None = None) -> tup
     else:
         raise ValueError(f"Unknown granularity: {granularity!r}")
     return start.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d")
+
+
+def _words(text: str) -> str:
+    return " ".join(re.findall(r"\w+", text.casefold()))
+
+
+def match_descriptions(query: str, descriptions: Iterable[str]) -> list[str]:
+    """Descriptions matching query, ignoring case, emoji and punctuation, so
+    "weight cardio training" (or just "cardio") finds "🏋️‍♂️ Weight + cardio training".
+    A description equal to the query that way wins over ones merely containing it."""
+    needle = _words(query)
+    candidates = set(descriptions)
+    exact = sorted(d for d in candidates if _words(d) == needle)
+    return exact or sorted(d for d in candidates if needle in _words(d))
 
 
 def load_ignored_descriptions() -> set[str]:

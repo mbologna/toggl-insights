@@ -381,6 +381,16 @@ class TestApiSessionsTypical:
         assert resp.status_code == 409
         assert resp.json()["detail"]["matches"] == ["Yoga flow", "Yoga stretch"]
 
+    def test_full_title_without_emoji_or_punctuation(self, client):
+        yesterday = date.today() - timedelta(days=1)
+        TogglArchive(main._DB_PATH).upsert([self._entry(1, "🧘 Yoga + stretch", yesterday, 3600)])
+        # "+" in a query string decodes to a space, as an iOS Shortcut would send it
+        resp = client.get("/api/sessions/typical?description=yoga+stretch")
+        assert resp.status_code == 200
+        assert resp.json()["description"] == "🧘 Yoga + stretch"
+        encoded = client.get("/api/sessions/typical", params={"description": "🧘 Yoga + stretch"})
+        assert encoded.json()["description"] == "🧘 Yoga + stretch"
+
     def test_endpoint(self, client):
         yesterday = date.today() - timedelta(days=1)
         TogglArchive(main._DB_PATH).upsert([self._entry(1, "Yoga", yesterday, 5400)])

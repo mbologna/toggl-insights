@@ -17,6 +17,7 @@ from src.toggl import (
     TogglArchive,
     TogglReportsClient,
     date_range_for_granularity,
+    match_descriptions,
     recurring_descriptions,
     session_stats,
     visit_stats,
@@ -391,10 +392,11 @@ def api_sessions() -> dict:
 def _build_typical_session(archive: TogglArchive, query: str, weeks: int, today: date) -> dict:
     """Typical length of one description's visits over the last `weeks` full weeks.
 
-    `query` is a case-insensitive substring of the description, so callers that
-    can't easily send emoji (an iOS Shortcut) can pass a plain word. Today is left
-    out: it is usually still in progress. Raises 404 when nothing matches and 409
-    when the substring matches more than one description.
+    `query` is matched by match_descriptions (case, emoji and punctuation
+    ignored), so callers that can't easily send emoji (an iOS Shortcut) can pass
+    the title's words. Today is left out: it is usually still in progress. Raises
+    404 when nothing matches and 409 when the query matches more than one
+    description.
     """
     since = today - timedelta(weeks=weeks)
     entries = [
@@ -402,8 +404,7 @@ def _build_typical_session(archive: TogglArchive, query: str, weeks: int, today:
         for e in archive.get_described_entries(since=since.isoformat())
         if since <= TogglReportsClient._entry_date(e) < today
     ]
-    needle = query.casefold()
-    matches = sorted({e["description"] for e in entries if needle in e["description"].casefold()})
+    matches = match_descriptions(query, (e["description"] for e in entries))
     if not matches:
         raise HTTPException(status_code=404, detail=f"no entries matching {query!r} in the last {weeks} weeks")
     if len(matches) > 1:

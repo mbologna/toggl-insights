@@ -15,6 +15,7 @@ from src.toggl import (
     TogglReportsClient,
     format_duration,
     load_ignored_descriptions,
+    match_descriptions,
     recurring_descriptions,
     session_stats,
     sparkline,
@@ -383,6 +384,23 @@ class TestSessionStats:
             "min_secs": 1800,
             "max_secs": 5400,
         }
+
+
+class TestMatchDescriptions:
+    TITLES = ["🧘 Morning yoga + stretch", "🧘 Morning yoga", "Spanish"]
+
+    def test_ignores_emoji_punctuation_and_case(self):
+        assert match_descriptions("MORNING yoga stretch", self.TITLES) == ["🧘 Morning yoga + stretch"]
+
+    def test_exact_title_wins_over_titles_containing_it(self):
+        assert match_descriptions("morning yoga", self.TITLES) == ["🧘 Morning yoga"]
+
+    def test_part_of_a_title(self):
+        assert match_descriptions("yoga", self.TITLES) == ["🧘 Morning yoga", "🧘 Morning yoga + stretch"]
+        assert match_descriptions("stretch", self.TITLES) == ["🧘 Morning yoga + stretch"]
+
+    def test_no_match(self):
+        assert match_descriptions("running", self.TITLES) == []
 
 
 class TestVisitStats:
