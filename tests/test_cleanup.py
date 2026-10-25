@@ -8,7 +8,17 @@ import pytest
 import requests
 
 import src.cleanup as cleanup
-from src.cleanup import FRAGMENT, LONG, STUB, BackupLog, CleanupThresholds, covered_secs, find_spurious
+from src.cleanup import (
+    DAILY,
+    LONG,
+    STUB,
+    BackupLog,
+    CleanupThresholds,
+    Scan,
+    covered_secs,
+    find_spurious,
+    is_once_a_day,
+)
 from src.toggl import RATE_LIMIT_RETRY_DELAY_SECONDS, TogglArchive, TogglWriteClient
 
 THRESHOLDS = CleanupThresholds()
@@ -30,8 +40,9 @@ class TestCoveredSecs:
 
 
 class TestFindSpurious:
-    def _find(self, entries: list[dict], median: int = 3600) -> list:
-        return find_spurious({"Yoga": entries}, {"Yoga": median}, THRESHOLDS)
+    def _find(self, entries: list[dict], median: int = 3600, daily: bool = False) -> list:
+        scan = Scan({"Yoga": entries}, {"Yoga": median}, frozenset({"Yoga"} if daily else ()))
+        return find_spurious(scan, THRESHOLDS)
 
     def test_stub_below_a_tenth_of_the_median(self):
         (c,) = self._find([_e(1, "2026-06-01T10:00:00+02:00", 300)])
@@ -52,53 +63,81 @@ class TestFindSpurious:
         # 3x a 10-minute median, but well under 2 hours: a long drive, not a forgotten timer
         assert self._find([_e(1, "2026-06-01T10:00:00+02:00", 40 * 60)], median=600) == []
 
-    def test_restart_is_merged_by_covered_time(self):
-        (c,) = self._find([_e(1, "2026-06-01T10:00:00+02:00", 1800), _e(2, "2026-06-01T10:31:00+02:00", 1500)])
-        assert c.rule == FRAGMENT
+    def test_activities_that_repeat_in_a_day_are_never_merged(self):
+        entries = [
+            _e(1, "2026-06-01T10:00:00+02:00", 600),
+            _e(2, "2026-06-01T10:11:00+02:00", 600),  # 1 minute later
+            _e(3, "2026-06-01T10:15:00+02:00", 600),  # overlapping
+        ]
+        assert self._find(entries, median=600) == []
+
+    def test_once_a_day_activity_is_merged_by_covered_time(self):
+        entries = [_e(1, "2026-06-01T10:00:00+02:00", 1800), _e(2, "2026-06-01T10:48:00+02:00", 1500)]
+        (c,) = self._find(entries, daily=True)
+        assert c.rule == DAILY
         assert [e["id"] for e in c.entries] == [1, 2]
         assert c.merged_secs == 3300
 
-    def test_duplicate_merges_away(self):
-        (c,) = self._find([_e(1, "2026-06-01T10:00:00+02:00", 1800), _e(2, "2026-06-01T10:00:00+02:00", 1800)])
-        assert (c.rule, c.merged_secs) == (FRAGMENT, 1800)
-
-    def test_no_merge_across_a_longer_pause(self):
-        assert self._find([_e(1, "2026-06-01T10:00:00+02:00", 1800), _e(2, "2026-06-01T10:40:00+02:00", 1500)]) == []
-
-    def test_no_merge_across_days(self):
-        entries = [_e(1, "2026-06-01T23:00:00+02:00", 3540), _e(2, "2026-06-02T00:00:00+02:00", 1800)]
-        assert self._find(entries) == []
-
-    def test_pause_capped_at_the_median(self):
-        thresholds = CleanupThresholds(fragment_gap_minutes=30)
-        entries = [_e(1, "2026-06-01T10:00:00+02:00", 300), _e(2, "2026-06-01T10:15:00+02:00", 300)]
-        # 10-minute pause between two usual 5-minute sessions: separate sessions
-        assert find_spurious({"Yoga": entries}, {"Yoga": 300}, thresholds) == []
-
-    def test_stub_inside_a_restart_is_deleted_not_merged(self):
+    def test_once_a_day_merge_keeps_short_pieces(self):
         entries = [
             _e(1, "2026-06-01T10:00:00+02:00", 1800),
-            _e(2, "2026-06-01T10:30:30+02:00", 10),
-            _e(3, "2026-06-01T10:31:00+02:00", 1500),
+            _e(2, "2026-06-01T10:31:00+02:00", 10),
+            _e(3, "2026-06-01T10:32:00+02:00", 1500),
         ]
-        stub, fragment = self._find(entries)
-        assert (stub.rule, [e["id"] for e in stub.entries]) == (STUB, [2])
-        assert (fragment.rule, [e["id"] for e in fragment.entries]) == (FRAGMENT, [1, 3])
+        (c,) = self._find(entries, daily=True)
+        assert (c.rule, [e["id"] for e in c.entries], c.merged_secs) == (DAILY, [1, 2, 3], 3310)
+
+    def test_once_a_day_duplicate_merges_away(self):
+        entries = [_e(1, "2026-06-01T10:00:00+02:00", 1800), _e(2, "2026-06-01T10:00:00+02:00", 1800)]
+        (c,) = self._find(entries, daily=True)
+        assert (c.rule, c.merged_secs) == (DAILY, 1800)
+
+    def test_once_a_day_lone_stub_is_deleted(self):
+        (c,) = self._find([_e(1, "2026-06-01T10:00:00+02:00", 20)], daily=True)
+        assert c.rule == STUB
+
+    def test_once_a_day_entries_on_different_days_stay(self):
+        entries = [_e(1, "2026-06-01T23:00:00+02:00", 3540), _e(2, "2026-06-02T00:00:00+02:00", 1800)]
+        assert self._find(entries, daily=True) == []
 
     def test_forgotten_timer_is_never_merged(self):
         entries = [_e(1, "2026-06-01T10:00:00+02:00", 1800), _e(2, "2026-06-01T10:31:00+02:00", 5 * 3600)]
-        assert [c.rule for c in self._find(entries)] == [LONG]
+        assert [c.rule for c in self._find(entries, daily=True)] == [LONG]
 
     def test_description_without_median_is_skipped(self):
-        assert find_spurious({"Yoga": [_e(1, "2026-06-01T10:00:00+02:00", 5)]}, {}, THRESHOLDS) == []
+        assert find_spurious(Scan({"Yoga": [_e(1, "2026-06-01T10:00:00+02:00", 5)]}, {}), THRESHOLDS) == []
+
+
+class TestIsOnceADay:
+    @staticmethod
+    def _days(singles: int, doubles: int) -> list[dict]:
+        entries, n = [], 0
+        for day in range(1, singles + doubles + 1):
+            for hour in (10, 18)[: 1 if day <= singles else 2]:
+                n += 1
+                entries.append(_e(n, f"2026-06-{day:02d}T{hour}:00:00+02:00", 3600))
+        return entries
+
+    def test_nearly_always_one_entry(self):
+        assert is_once_a_day(self._days(singles=19, doubles=1), 3600, THRESHOLDS)
+
+    def test_often_several_entries(self):
+        assert not is_once_a_day(self._days(singles=5, doubles=5), 3600, THRESHOLDS)
+
+    def test_needs_enough_days(self):
+        assert not is_once_a_day(self._days(singles=7, doubles=0), 3600, THRESHOLDS)
+
+    def test_stubs_do_not_count_as_a_second_entry(self):
+        entries = [*self._days(singles=10, doubles=0), _e(99, "2026-06-01T12:00:00+02:00", 20)]
+        assert is_once_a_day(entries, 3600, THRESHOLDS)
 
 
 class TestThresholdsFromEnv:
     def test_overrides_and_bad_values(self, monkeypatch):
-        monkeypatch.setenv("CLEANUP_FRAGMENT_GAP_MINUTES", "5")
+        monkeypatch.setenv("CLEANUP_DAILY_MIN_DAYS", "5")
         monkeypatch.setenv("CLEANUP_STUB_RATIO", "not-a-number")
         t = CleanupThresholds.from_env()
-        assert t.fragment_gap_minutes == 5
+        assert t.daily_min_days == 5
         assert t.stub_ratio == CleanupThresholds().stub_ratio
 
 
@@ -126,17 +165,26 @@ class TestCollect:
         today = date(2026, 6, 29)
         archive.upsert([*_weekly_yoga(), _row(1, "2026-06-28", 20), _row(2, "2026-06-29", 20)])
 
-        entries, medians = cleanup.collect(archive, today, date(2026, 6, 1), None)
+        scan = cleanup.collect(archive, today, date(2026, 6, 1), None, THRESHOLDS)
 
-        assert medians == {"Yoga": 3600}
-        assert [e["id"] for e in entries["Yoga"] if e["start"] >= "2026-06-28"] == [1]
+        assert scan.medians == {"Yoga": 3600}
+        assert [e["id"] for e in scan.entries["Yoga"] if e["start"] >= "2026-06-28"] == [1]
+        assert scan.daily == {"Yoga"}
+
+    def test_activity_repeating_in_a_day_is_not_once_a_day(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TOGGL_IGNORED_DESCRIPTIONS", raising=False)
+        archive = TogglArchive(str(tmp_path / "toggl.db"))
+        twice = [_row(200 + r["id"], r["start"][:10], 3600, hour=18) for r in _weekly_yoga()]
+        archive.upsert([*_weekly_yoga(), *twice])
+        scan = cleanup.collect(archive, date(2026, 6, 29), date(2026, 6, 1), None, THRESHOLDS)
+        assert scan.daily == frozenset()
 
     def test_description_filter(self, tmp_path, monkeypatch):
         monkeypatch.delenv("TOGGL_IGNORED_DESCRIPTIONS", raising=False)
         archive = TogglArchive(str(tmp_path / "toggl.db"))
         archive.upsert(_weekly_yoga())
-        entries, _ = cleanup.collect(archive, date(2026, 6, 29), date(2026, 6, 1), "spanish")
-        assert entries == {}
+        scan = cleanup.collect(archive, date(2026, 6, 29), date(2026, 6, 1), "spanish", THRESHOLDS)
+        assert scan.entries == {}
 
 
 class FakeWriter:
@@ -194,12 +242,12 @@ class TestApplyAndRestore:
     def _ids(self, archive) -> list[int]:
         return sorted(e["id"] for e in archive.get_described_entries(since="2000-01-01"))
 
-    def test_stub_and_fragment_then_restore(self, tmp_path):
+    def test_stub_and_daily_merge_then_restore(self, tmp_path):
         rows = [_row(1, "2026-06-01", 1800), _row(2, "2026-06-01", 1500, hour=11), _row(3, "2026-06-02", 10)]
         archive, log, writer = self._setup(tmp_path, rows)
         candidates = [
             cleanup.Candidate(STUB, "Yoga", 3600, (rows[2],)),
-            cleanup.Candidate(FRAGMENT, "Yoga", 3600, (rows[0], rows[1]), 3300),
+            cleanup.Candidate(DAILY, "Yoga", 3600, (rows[0], rows[1]), 3300),
             cleanup.Candidate(LONG, "Yoga", 3600, (rows[0],)),
         ]
 

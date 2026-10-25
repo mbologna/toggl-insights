@@ -5,17 +5,18 @@ Usage:
     python -m src.cleanup --apply [--limit N]    # change it in Toggl and the archive
     python -m src.cleanup --restore RUN_ID       # undo an --apply run
     options: --since YYYY-MM-DD (default: 90 days ago), --description WORDS,
-             --rule stub|fragment (only that rule)
+             --rule stub|daily|long (only that rule)
 
 Three rules, each relative to the description's own median entry length over
 the last 12 weeks (thresholds in CleanupThresholds, overridable via CLEANUP_*):
 
 - stub: far shorter than usual (a timer started by mistake) -> deleted
-- fragment: several entries of one activity on the same day with only a
-  short pause between them (a timer stopped and restarted; default up to 2
-  minutes, since longer pauses are often real separate trips) -> merged into the
-  first, whose duration becomes the time the entries cover (gaps excluded,
-  overlaps counted once, so a duplicated entry merges away)
+- daily: more than one entry on a day, for an activity that happens once a day
+  (a timer stopped and restarted) -> merged into the first entry, whose
+  duration becomes the time the entries cover (gaps excluded, overlaps counted
+  once). An activity counts as once a day when nearly all its days in the
+  last 12 weeks have a single entry. Activities that can repeat in a day (a
+  drive, a shop) are never merged.
 - long: far longer than usual (a timer left running) -> reported only, since
   the real stop time is unknown; fix it in Toggl
 
@@ -56,7 +57,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 STUB = "stub"
-FRAGMENT = "fragment"
+DAILY = "daily"
 LONG = "long"
 _MEDIAN_WEEKS = 12
 
@@ -65,9 +66,12 @@ _MEDIAN_WEEKS = 12
 class CleanupThresholds:
     stub_ratio: float = 0.10
     stub_min_secs: int = 60
-    fragment_gap_minutes: int = 2
     long_ratio: float = 3.0
     long_min_secs: int = 7200
+    # Once a day: at least daily_min_days days with entries in the median window,
+    # and at least daily_ratio of them with a single entry (stubs not counted).
+    daily_ratio: float = 0.9
+    daily_min_days: int = 8
 
     @classmethod
     def from_env(cls) -> CleanupThresholds:
@@ -84,16 +88,33 @@ class CleanupThresholds:
         return cls(
             stub_ratio=read("stub_ratio", defaults.stub_ratio),
             stub_min_secs=int(read("stub_min_secs", defaults.stub_min_secs)),
-            fragment_gap_minutes=int(read("fragment_gap_minutes", defaults.fragment_gap_minutes)),
             long_ratio=read("long_ratio", defaults.long_ratio),
             long_min_secs=int(read("long_min_secs", defaults.long_min_secs)),
+            daily_ratio=read("daily_ratio", defaults.daily_ratio),
+            daily_min_days=int(read("daily_min_days", defaults.daily_min_days)),
         )
+
+    def stub_below(self, median: int) -> float:
+        return max(self.stub_min_secs, self.stub_ratio * median)
+
+    def long_above(self, median: int) -> float:
+        return max(self.long_min_secs, self.long_ratio * median)
+
+
+@dataclass(frozen=True)
+class Scan:
+    """What collect() found: each recurring description's entries in the scanned
+    days, its median entry length, and which descriptions happen once a day."""
+
+    entries: dict[str, list[dict]]
+    medians: dict[str, int]
+    daily: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
 class Candidate:
     """One finding. entries are archive rows (id, description, start, duration);
-    for a fragment the first one is kept and grows to merged_secs."""
+    for a daily merge the first one is kept and grows to merged_secs."""
 
     rule: str
     description: str
@@ -127,61 +148,53 @@ def covered_secs(entries: list[dict]) -> int:
     return total
 
 
-def _restart_groups(entries: list[dict], max_gap: timedelta) -> list[list[dict]]:
-    """Split start-ordered entries into runs on the same local day where each
-    starts at most max_gap after the run so far stopped."""
-    groups: list[list[dict]] = []
-    group_end: datetime | None = None
-    for entry in entries:
-        start, stop = _interval(entry)
-        if (
-            group_end is not None
-            and entry["start"][:10] == groups[-1][0]["start"][:10]
-            and start - group_end <= max_gap
-        ):
-            groups[-1].append(entry)
-            group_end = max(group_end, stop)
-        else:
-            groups.append([entry])
-            group_end = stop
-    return groups
+def _by_day(entries: list[dict]) -> dict[str, list[dict]]:
+    """Start-ordered entries grouped by local day (start_iso carries the local offset)."""
+    days: dict[str, list[dict]] = {}
+    for entry in sorted(entries, key=lambda e: _parse_iso(e["start"])):
+        days.setdefault(entry["start"][:10], []).append(entry)
+    return days
 
 
-def find_spurious(
-    entries_by_description: dict[str, list[dict]], medians: dict[str, int], thresholds: CleanupThresholds
-) -> list[Candidate]:
+def is_once_a_day(entries: list[dict], median: int, thresholds: CleanupThresholds) -> bool:
+    """True when nearly every day with (non-stub) entries has exactly one."""
+    stub_below = thresholds.stub_below(median)
+    counts = [sum(e["duration"] >= stub_below for e in day) for day in _by_day(entries).values()]
+    counts = [c for c in counts if c]
+    return len(counts) >= thresholds.daily_min_days and counts.count(1) >= thresholds.daily_ratio * len(counts)
+
+
+def find_spurious(scan: Scan, thresholds: CleanupThresholds) -> list[Candidate]:
     """Apply the three rules (module docstring) to each description's entries."""
     candidates: list[Candidate] = []
-    for description, entries in sorted(entries_by_description.items()):
-        median = medians.get(description)
+    for description, entries in sorted(scan.entries.items()):
+        median = scan.medians.get(description)
         if not median:
             continue
-        stub_below = max(thresholds.stub_min_secs, thresholds.stub_ratio * median)
-        long_above = max(thresholds.long_min_secs, thresholds.long_ratio * median)
-        # A pause longer than a usual session means a separate session, whatever the gap setting.
-        max_gap = timedelta(seconds=min(thresholds.fragment_gap_minutes * 60, median))
-
-        mergeable: list[dict] = []
-        for entry in sorted(entries, key=lambda e: _parse_iso(e["start"])):
-            if entry["duration"] < stub_below:
-                candidates.append(Candidate(STUB, description, median, (entry,)))
-            elif entry["duration"] > long_above:
-                candidates.append(Candidate(LONG, description, median, (entry,)))
+        stub_below, long_above = thresholds.stub_below(median), thresholds.long_above(median)
+        for day in _by_day(entries).values():
+            longs = [e for e in day if e["duration"] > long_above]
+            rest = [e for e in day if e["duration"] <= long_above]
+            candidates += [Candidate(LONG, description, median, (e,)) for e in longs]
+            if description in scan.daily and len(rest) > 1:
+                # Short pieces are part of the visit: merged in, not deleted.
+                candidates.append(Candidate(DAILY, description, median, tuple(rest), covered_secs(rest)))
             else:
-                mergeable.append(entry)
+                candidates += [Candidate(STUB, description, median, (e,)) for e in rest if e["duration"] < stub_below]
 
-        for group in _restart_groups(mergeable, max_gap):
-            if len(group) > 1:
-                candidates.append(Candidate(FRAGMENT, description, median, tuple(group), covered_secs(group)))
-
-    order = {STUB: 0, FRAGMENT: 1, LONG: 2}
+    order = {STUB: 0, DAILY: 1, LONG: 2}
     return sorted(candidates, key=lambda c: (order[c.rule], c.entries[0]["start"]))
 
 
 def collect(
-    archive: TogglArchive, today: date, since: date, description_filter: str | None
-) -> tuple[dict[str, list[dict]], dict[str, int]]:
-    """Recurring descriptions' entries from since to yesterday, plus their 12-week medians.
+    archive: TogglArchive,
+    today: date,
+    since: date,
+    description_filter: str | None,
+    thresholds: CleanupThresholds,
+) -> Scan:
+    """Recurring descriptions' entries from since to yesterday, their 12-week
+    medians, and which of them happen once a day (judged on the same 12 weeks).
 
     Today is left out: a timer split today may still be running."""
     median_since = today - timedelta(weeks=_MEDIAN_WEEKS)
@@ -192,14 +205,18 @@ def collect(
 
     entries_by_description: dict[str, list[dict]] = {}
     medians: dict[str, int] = {}
+    daily: set[str] = set()
     for description in descriptions:
         mine = [e for e in recent if e["description"] == description]
         dated = [(TogglReportsClient._entry_date(e), e) for e in mine]
-        stats = session_stats([e for d, e in dated if median_since < d < today])
+        window = [e for d, e in dated if median_since < d < today]
+        stats = session_stats(window)
         if stats["count"]:
             medians[description] = stats["median_secs"]
             entries_by_description[description] = [e for d, e in dated if since <= d < today]
-    return entries_by_description, medians
+            if is_once_a_day(window, stats["median_secs"], thresholds):
+                daily.add(description)
+    return Scan(entries_by_description, medians, frozenset(daily))
 
 
 def _gaps(entries: tuple[dict, ...]) -> list[int]:
@@ -215,7 +232,7 @@ def _secs(seconds: int) -> str:
 def format_report(candidates: list[Candidate]) -> str:
     sections = {
         STUB: "Stubs, to delete",
-        FRAGMENT: "Fragments, to merge into the first entry",
+        DAILY: "Same-day entries of a once-a-day activity, to merge into the first",
         LONG: "Forgotten timers, to fix by hand in Toggl (report only)",
     }
     lines: list[str] = []
@@ -227,7 +244,7 @@ def format_report(candidates: list[Candidate]) -> str:
         for c in found:
             times = " + ".join(f"{e['start'][11:16]} {_secs(e['duration'])}" for e in c.entries)
             result = ""
-            if rule == FRAGMENT:
+            if rule == DAILY:
                 gaps = ", ".join(_secs(g) if g >= 0 else f"overlap {_secs(-g)}" for g in _gaps(c.entries))
                 result = f" → {_secs(c.merged_secs)} (gaps: {gaps})"
             ids = ", ".join(f"#{e['id']}" for e in c.entries)
@@ -257,7 +274,7 @@ class BackupLog:
 def apply(
     candidates: list[Candidate], writer: TogglWriteClient, archive: TogglArchive, log: BackupLog, run_id: str
 ) -> int:
-    """Carry out the stub and fragment candidates; returns how many were applied.
+    """Carry out the stub and daily candidates; returns how many were applied.
 
     Each change is logged (with Toggl's full copy of the entry) before it is
     made, so --restore can undo a run even if it stopped half-way."""
@@ -265,7 +282,7 @@ def apply(
     for c in candidates:
         if c.rule == LONG:
             continue
-        keep, drop = (c.entries[0], c.entries[1:]) if c.rule == FRAGMENT else (None, c.entries)
+        keep, drop = (c.entries[0], c.entries[1:]) if c.rule == DAILY else (None, c.entries)
         if keep is not None:
             original = writer.get_entry(keep["id"])
             if original is None:
@@ -343,7 +360,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--since", type=date.fromisoformat, help="first day to scan (default: 90 days ago)")
     parser.add_argument("--description", help="only matching descriptions (case, emoji and punctuation ignored)")
     parser.add_argument("--apply", action="store_true", help="change Toggl and the archive (default: report only)")
-    parser.add_argument("--rule", choices=[STUB, FRAGMENT, LONG], help="only findings of this rule")
+    parser.add_argument("--rule", choices=[STUB, DAILY, LONG], help="only findings of this rule")
     parser.add_argument("--limit", type=int, help="apply at most this many findings")
     parser.add_argument("--restore", metavar="RUN_ID", help="undo an --apply run")
     args = parser.parse_args(argv)
@@ -363,8 +380,11 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     today = date.today()
-    entries, medians = collect(archive, today, args.since or today - timedelta(days=90), args.description)
-    candidates = find_spurious(entries, medians, CleanupThresholds.from_env())
+    thresholds = CleanupThresholds.from_env()
+    scan = collect(archive, today, args.since or today - timedelta(days=90), args.description, thresholds)
+    if scan.daily:
+        print(f"Once a day (same-day entries get merged): {', '.join(sorted(scan.daily))}\n")
+    candidates = find_spurious(scan, thresholds)
     if args.rule:
         candidates = [c for c in candidates if c.rule == args.rule]
     print(format_report(candidates))

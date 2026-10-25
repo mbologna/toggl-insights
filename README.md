@@ -86,7 +86,7 @@ Projects are discovered dynamically from Toggl (`GET /me/projects`, cached 24h)
 | `ALERT_TIMEZONE` | no | `UTC` | alerts | Timezone used to bucket entries into local days/weeks/months |
 | `APPRISE_CONNECT_TIMEOUT` / `APPRISE_READ_TIMEOUT` / `APPRISE_RETRIES` | no | `15` / `15` / `4` | alerts | Tuned for a cold cross-cluster Tailscale path between infrequent alert runs |
 | `CLEANUP_STUB_RATIO` / `CLEANUP_STUB_MIN_SECS` | no | `0.10` / `60` | cleanup | An entry shorter than this share of its activity's median, or than this many seconds, is a stub |
-| `CLEANUP_FRAGMENT_GAP_MINUTES` | no | `2` | cleanup | Longest pause (also capped at the median) between two entries that still counts as one restarted timer |
+| `CLEANUP_DAILY_RATIO` / `CLEANUP_DAILY_MIN_DAYS` | no | `0.9` / `8` | cleanup | An activity is once a day (same-day entries get merged) when at least this share of its days, over at least this many days in 12 weeks, have a single entry |
 | `CLEANUP_LONG_RATIO` / `CLEANUP_LONG_MIN_SECS` | no | `3` / `7200` | cleanup | An entry longer than both is reported as a forgotten timer |
 | `CLEANUP_BACKUP_PATH` | no | `cleanup-backup.jsonl` next to `TOGGL_DB_PATH` | cleanup | Backup log that `--restore` replays |
 
@@ -185,10 +185,13 @@ weeks:
 
 - **Stub:** far shorter than usual, such as a timer started by mistake. It
   is deleted.
-- **Fragment:** two or more same-day entries with at most a 2-minute pause
-  between them, such as a timer stopped and restarted, or a duplicate. They
-  are merged into the first entry. Its new duration is the time the entries
-  cover, so gaps are left out and overlaps count once.
+- **Daily:** more than one entry on a day for an activity that happens once a
+  day, such as a timer stopped and restarted. They are merged into the first
+  entry, short pieces included. Its new duration is the time the entries
+  cover, so gaps are left out and overlaps count once. Once-a-day activities
+  are detected automatically: nearly every day they appear on (90%, over at
+  least 8 days in 12 weeks) has a single entry. Activities that often repeat
+  in a day, such as a drive or a shop, are never merged.
 - **Forgotten timer:** far longer than usual. It is only reported, because
   the real stop time is unknown.
 
@@ -198,7 +201,7 @@ python -m src.cleanup --rule stub --apply    # change Toggl and the archive
 python -m src.cleanup --restore 20261024T210000Z
 ```
 
-`--since` (default: 90 days ago), `--description` (a substring) and `--limit`
+`--since` (default: 90 days ago), `--description` (matched like the API) and `--limit`
 narrow a run. Today is never touched, because a timer may still be running.
 
 Toggl has no trash, so `--apply` first appends Toggl's own copy of every
