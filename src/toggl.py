@@ -377,6 +377,11 @@ def _toggl_utc(value: datetime) -> str:
     return value.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def row_of(entry: dict) -> tuple:
+    """A fetched entry as the archive stores it: (project_id, start_iso, duration_secs, description)."""
+    return (entry["project_id"], entry["start"], max(entry.get("duration", 0), 0), entry.get("description") or "")
+
+
 class TogglArchive:
     """SQLite-backed archive that accumulates time entries across API refreshes.
 
@@ -404,6 +409,14 @@ class TogglArchive:
         CREATE TABLE IF NOT EXISTS meta (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS history_checks (
+            checked_at  TEXT    PRIMARY KEY,
+            complete    INTEGER NOT NULL,
+            added       INTEGER NOT NULL DEFAULT 0,
+            updated     INTEGER NOT NULL DEFAULT 0,
+            removed     INTEGER NOT NULL DEFAULT 0,
+            refused     INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS alert_cooldowns (
             alert_type  TEXT    NOT NULL,
@@ -510,6 +523,33 @@ class TogglArchive:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.executemany("DELETE FROM time_entries WHERE id = ?", [(i,) for i in ids])
         return cursor.rowcount
+
+    def rows_by_id(self) -> dict[int, tuple]:
+        """Every archived entry as id -> (project_id, start_iso, duration_secs, description),
+        the same shape as row_of() gives a fetched entry, to tell what an upsert changes."""
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute("SELECT id, project_id, start_iso, duration_secs, description FROM time_entries")
+            return {r[0]: tuple(r[1:]) for r in rows}
+
+    def record_history_check(
+        self, complete: bool, added: int = 0, updated: int = 0, removed: int = 0, refused: int = 0
+    ) -> None:
+        """Log one full-history comparison with Toggl (see main._check_history_if_due)."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO history_checks (checked_at, complete, added, updated, removed, refused) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (datetime.now(tz=UTC).isoformat(), int(complete), added, updated, removed, refused),
+            )
+
+    def history_checks_since(self, since: datetime) -> list[dict]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM history_checks WHERE checked_at >= ? ORDER BY checked_at",
+                (since.astimezone(UTC).isoformat(),),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def get_meta(self, key: str) -> str | None:
         with sqlite3.connect(self.db_path) as conn:

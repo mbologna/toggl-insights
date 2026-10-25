@@ -36,9 +36,9 @@ entrypoints sends weekly/monthly reports and a lapsed-habit nudge to [Apprise](h
    ┌────────────────▼───────────┐   ┌───────▼────────────────────┐
    │  FastAPI app (src/main.py) │   │  Alert entrypoints          │
    │  - background sync thread  │   │  (src/alerts.py, run via    │
-   │    (hourly refresh + a     │   │   python -m src.alerts)     │
-   │    one-time historical     │   │  - weekly digest            │
-   │    backfill on first boot) │   │  - monthly report           │
+   │    (hourly 90-day sync +   │   │   python -m src.alerts)     │
+   │    a daily full-history    │   │  - weekly digest            │
+   │    check against Toggl)    │   │  - monthly report           │
    │  - /api/data, /api/heatmap,│   │  - session-gap nudge        │
    │    /api/hours, /health     │   │                             │
    │  - serves the dashboard    │   │                             │
@@ -52,7 +52,7 @@ entrypoints sends weekly/monthly reports and a lapsed-habit nudge to [Apprise](h
 The dashboard (`src/main.py`) and the alert entrypoints (`src/alerts.py`) are
 independent processes sharing the same SQLite archive (same `toggl-insights-data`
 PVC in k8s), but only the dashboard's background thread ever calls the Reports
-API — hourly, plus the one-time historical backfill on first boot. The alert
+API — hourly, plus the daily full-history check (below). The alert
 entrypoints (`_get_client_and_archive()`) deliberately just *read* that already-
 synced archive instead of re-fetching it themselves; they used to each
 independently re-sync the latest 90–120 days on every run, which meant up to 6
@@ -73,7 +73,7 @@ Projects are discovered dynamically from Toggl (`GET /me/projects`, cached 24h)
 | `TOGGL_WORKSPACE_ID` | yes | — | all | Numeric Toggl workspace ID |
 | `APPRISE_URL` | yes (alerts, scheduled cleanup) | — | alerts, cleanup | Apprise notify endpoint |
 | `TOGGL_DB_PATH` | no | `/data/toggl.db` | all | SQLite archive path |
-| `TOGGL_HISTORY_START_DATE` | no | `2006-01-01` | dashboard | How far back the one-time backfill reaches |
+| `TOGGL_HISTORY_START_DATE` | no | `2006-01-01` | dashboard | How far back the first full-history check reaches |
 | `TOGGL_DAILY_TARGET_HOURS` | no | — | dashboard | Daily hours target shown on the Overview tab |
 | `TOGGL_WEEKLY_TARGETS` | no | `{}` | both | JSON map `{"project_id": hours}`, weekly per-project targets |
 | `TOGGL_YEARLY_GOALS` | no | `{}` | dashboard | JSON map `{"project_id": hours}`, annual goal tracking |
@@ -101,10 +101,10 @@ cp .env.template .env   # fill in TOGGL_API_TOKEN / TOGGL_WORKSPACE_ID
 uv run uvicorn src.main:app --reload
 ```
 
-Dashboard: http://localhost:8000. The first boot kicks off a one-time
-historical backfill in a background thread (see `TOGGL_HISTORY_START_DATE`) —
-on the free tier's hourly quota this can take a while; `/health` stays green
-throughout (see below) and the dashboard serves whatever's already archived.
+Dashboard: http://localhost:8000. The first boot fetches the whole history
+in a background thread (see `TOGGL_HISTORY_START_DATE`) — on the free tier's
+hourly quota this can take a while; `/health` stays green throughout (see
+below) and the dashboard serves whatever's already archived.
 
 To try the dashboard without a Toggl account, `uv run python scripts/demo.py`
 serves it on http://localhost:8000 from three years of made-up entries (no
@@ -175,8 +175,27 @@ candidate list when the substring matches more than one description.
 
 The archive stores each entry's description (added as a column in an
 in-place migration). Rows archived before that have a `NULL` description,
-which makes the dashboard re-run the historical backfill once on its next
-boot to fill them in.
+which makes the next history check run at once to fill them in.
+
+## Keeping the archive in line with Toggl
+
+The hourly sync fetches the last 90 days: it adds new entries, updates edited
+ones, and removes the ones deleted in Toggl. That last step only runs after a
+complete fetch, and is refused when it would remove more than a fifth of the
+window, which looks like an API problem rather than deletions.
+
+Once a day, from 03:00 local time (`ALERT_TIMEZONE`), the dashboard runs the
+same comparison over the whole history, so older edits and deletions reach the
+archive too. Its first run starts from `TOGGL_HISTORY_START_DATE`; later ones
+start from the archive's earliest entry, about 13 requests for two years of
+history. A restart doesn't repeat it on the same day. Every check is recorded,
+and the weekly cleanup message reports what the week's checks corrected (or
+that none completed).
+
+Fetches never follow the Reports API's next-page cursor: it skips entries
+(page 2 of a 13-month range started five months after page 1 ended, checked
+on 2026-10-25, explicit ordering or not). A range that doesn't fit one
+1000-entry page is split in half until each request fits.
 
 ## Cleanup
 
@@ -281,8 +300,8 @@ workspace ID or Toggl itself is broken.
 Returns `503` if the SQLite archive isn't reachable, or if the background sync
 thread's last successful run is older than 3 hours — the latter catches a
 sync thread silently stuck in an exception loop, which would otherwise just
-serve increasingly stale data forever. Never flags staleness during the
-one-time historical backfill (which can legitimately take hours).
+serve increasingly stale data forever. Never flags staleness while the daily
+history check runs (on the free tier's quota it can legitimately take hours).
 
 ## Deployment
 

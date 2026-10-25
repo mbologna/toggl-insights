@@ -5,8 +5,9 @@ import logging
 import os
 import threading
 import time
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
@@ -19,6 +20,7 @@ from src.toggl import (
     date_range_for_granularity,
     match_descriptions,
     recurring_descriptions,
+    row_of,
     session_stats,
     visit_stats,
 )
@@ -34,13 +36,18 @@ app = FastAPI(title="Toggl Insights")
 
 _DASHBOARD_HTML = os.path.join(os.path.dirname(__file__), "templates", "dashboard.html")
 _DB_PATH = os.environ.get("TOGGL_DB_PATH", "/data/toggl.db")
-# How far back the one-time historical backfill reaches. The Reports API has
+# How far back the first full-history check reaches. The Reports API has
 # no lower-bound floor (unlike /me/time_entries' ~90-day cap, confirmed
 # directly against the live API), so this can safely be set deep in the past
 # — an empty 366-day chunk still only costs one quota request.
 _TOGGL_HISTORY_START_DATE = os.environ.get("TOGGL_HISTORY_START_DATE", "2006-01-01")
-# meta key: start date of the last complete historical backfill.
+# meta keys: the earliest date a complete history check started from, and when
+# the last complete one finished (UTC ISO).
 _BACKFILL_FROM_KEY = "backfill_from"
+_HISTORY_CHECKED_KEY = "history_checked_at"
+# Local hour from which the daily history check is due: night, away from the
+# daytime jobs that share Toggl's hourly quota.
+_HISTORY_CHECK_HOUR = 3
 
 _CACHE_TTL = 3600  # 1 hour
 _api_cache: dict[str, tuple[float, dict]] = {}
@@ -52,10 +59,12 @@ _SESSIONS_WEEKLY_HISTORY_WEEKS = 26
 # Set by _sync_archive_once() on every successful run; /health uses it to
 # detect a background sync thread that's silently stuck in an exception loop
 # (its failures are only logged — see _background_sync_loop — never surfaced
-# otherwise). Stays None during the one-time historical backfill, which can
-# legitimately take hours on the free tier's quota, so that's never flagged
-# as stale.
+# otherwise).
 _last_sync_completed_at: float | None = None
+# True while the full-history check runs: on the free tier's quota it can wait
+# an hour per 402, holding up the hourly sync, which /health must not take for
+# a stuck thread.
+_history_check_running = False
 _STALE_SYNC_AFTER_SECONDS = 3 * _CACHE_TTL
 # Largest share of the synced window's archived entries a single sync may
 # delete as "gone from Toggl" (see _remove_deleted_entries).
@@ -78,23 +87,38 @@ def _get_client() -> TogglReportsClient:
 
 def _sync_archive_once() -> None:
     """Fetch the latest 90-day window, upsert it into the archive and drop
-    archived entries that were deleted in Toggl (see _remove_deleted_entries)."""
+    archived entries that were deleted in Toggl (see _apply_window)."""
     global _last_sync_completed_at
     client = _get_client()
     archive = TogglArchive(_DB_PATH)
     start_date, end_date = date_range_for_granularity("daily")
     raw, complete = client.fetch_window(start_date, end_date)
-    written = archive.upsert(raw)
-    logger.info("Synced %d entries (%s → %s)", written, start_date, end_date)
     if complete:
-        _remove_deleted_entries(archive, raw, start_date, end_date)
+        _apply_window(archive, raw, start_date, end_date)
     else:
+        archive.upsert(raw)
         logger.warning("Incomplete Toggl fetch: not checking for deleted entries this run")
+    logger.info("Synced %d entries (%s → %s)", len(raw), start_date, end_date)
     _last_sync_completed_at = time.monotonic()
 
 
-def _remove_deleted_entries(archive: TogglArchive, raw: list[dict], start_date: str, end_date: str) -> None:
+def _apply_window(archive: TogglArchive, raw: list[dict], start_date: str, end_date: str) -> dict[str, int]:
+    """Make the archive match a complete fetch of start_date..end_date: upsert it
+    and drop what Toggl no longer returns. Returns how many entries were added,
+    updated and removed, and how many removals were refused (see
+    _remove_deleted_entries)."""
+    before = archive.rows_by_id()
+    stored = [e for e in raw if e.get("id") and e.get("project_id") and e.get("stop")]
+    added = sum(e["id"] not in before for e in stored)
+    updated = sum(e["id"] in before and before[e["id"]] != row_of(e) for e in stored)
+    archive.upsert(raw)
+    removed, refused = _remove_deleted_entries(archive, raw, start_date, end_date)
+    return {"added": added, "updated": updated, "removed": removed, "refused": refused}
+
+
+def _remove_deleted_entries(archive: TogglArchive, raw: list[dict], start_date: str, end_date: str) -> tuple[int, int]:
     """Delete archived entries in the synced window that Toggl no longer returns.
+    Returns (removed, refused).
 
     upsert alone never forgets, so an entry deleted in Toggl would count in
     every stat forever. The window's first day is skipped: the API filters by
@@ -104,11 +128,11 @@ def _remove_deleted_entries(archive: TogglArchive, raw: list[dict], start_date: 
     deletions, and the archive is the only copy of the history.
     """
     if not raw:
-        return
+        return 0, 0
     first_day = (date.fromisoformat(start_date) + timedelta(days=1)).isoformat()
     missing = archive.ids_missing_from(first_day, end_date, {e["id"] for e in raw})
     if not missing:
-        return
+        return 0, 0
     archived = archive.count_entries_between(first_day, end_date)
     if len(missing) > _RECONCILE_MAX_FRACTION * archived:
         logger.error(
@@ -118,53 +142,76 @@ def _remove_deleted_entries(archive: TogglArchive, raw: list[dict], start_date: 
             first_day,
             end_date,
         )
-        return
+        return 0, len(missing)
     removed = archive.delete_ids(missing)
     logger.info("Removed %d archived entries deleted in Toggl: %s", removed, missing)
+    return removed, 0
 
 
-def _backfill_if_needed() -> None:
-    """One-time historical backfill back to TOGGL_HISTORY_START_DATE.
+def _check_history_if_due(now: datetime | None = None) -> None:
+    """Compare the whole archive with Toggl once a day, and repair it.
 
-    fetch_window already chunks any range into <=366-day windows, so this is
-    just one call. It is skipped once a complete backfill from that date (or
-    earlier) is recorded in the archive's meta table, or the earliest archived
-    entry already reaches that far back. The earliest entry alone isn't enough:
-    when the Toggl history starts after TOGGL_HISTORY_START_DATE it never
-    reaches it, and the backfill re-ran (about a dozen quota requests) on every
-    restart.
-
-    Also re-runs once (from the earliest archived entry, if older) when rows
-    archived before the description column existed still lack one, so
-    session stats cover the full history.
+    The hourly sync covers 90 days, so without this, edits and deletions of
+    older entries never reached the archive, nor did history a broken fetch
+    had skipped. Due once per local day from _HISTORY_CHECK_HOUR, and at once
+    when no complete check is recorded, when TOGGL_HISTORY_START_DATE moved
+    earlier than a complete check reached, or when old rows still lack a
+    description. That first check starts from TOGGL_HISTORY_START_DATE; later
+    ones from the day before the earliest archived entry, so the empty years
+    before it aren't fetched every night. An incomplete fetch only upserts what
+    came back (removing on a partial list could delete valid entries) and is
+    retried at the next hourly run. Every attempt is recorded for the weekly
+    cleanup report.
     """
+    global _history_check_running
     archive = TogglArchive(_DB_PATH)
-    earliest = archive.get_earliest_entry_time()
-    backfilled_from = archive.get_meta(_BACKFILL_FROM_KEY)
-    reaches_start = (backfilled_from is not None and backfilled_from <= _TOGGL_HISTORY_START_DATE) or (
-        earliest is not None and earliest[:10] <= _TOGGL_HISTORY_START_DATE
-    )
+    tz = ZoneInfo(os.environ.get("ALERT_TIMEZONE") or "Europe/Rome")
+    now = now or datetime.now(tz)
+    reached = archive.get_meta(_BACKFILL_FROM_KEY)
+    last = archive.get_meta(_HISTORY_CHECKED_KEY)
     missing_descriptions = archive.has_missing_descriptions()
-    if reaches_start and not missing_descriptions:
+    from_start = reached is None or reached > _TOGGL_HISTORY_START_DATE
+    new_day = last is None or (
+        datetime.fromisoformat(last).astimezone(tz).date() < now.date() and now.hour >= _HISTORY_CHECK_HOUR
+    )
+    if not (from_start or missing_descriptions or new_day):
         return
 
-    start_date = _TOGGL_HISTORY_START_DATE
+    earliest = archive.get_earliest_entry_time()
+    if from_start or earliest is None:
+        start_date = _TOGGL_HISTORY_START_DATE
+    else:
+        start_date = (date.fromisoformat(earliest[:10]) - timedelta(days=1)).isoformat()
     if earliest is not None:
         start_date = min(start_date, earliest[:10])
+    end_date = now.date().isoformat()
 
-    client = _get_client()
-    today = date.today().strftime("%Y-%m-%d")
-    reason = "description re-backfill" if reaches_start else "historical backfill"
-    logger.info("Starting one-time %s from %s to %s", reason, start_date, today)
-    raw, complete = client.fetch_window(start_date, today)
-    written = archive.upsert(raw)
+    logger.info("Checking the archive against Toggl (%s → %s)", start_date, end_date)
+    _history_check_running = True
+    try:
+        raw, complete = _get_client().fetch_window(start_date, end_date)
+    finally:
+        _history_check_running = False
     if not complete:
-        logger.warning("Historical backfill incomplete (wrote %d entries); retrying on the next start", written)
+        archive.upsert(raw)
+        archive.record_history_check(complete=False)
+        logger.warning("History check incomplete: nothing removed, retrying at the next run")
         return
-    archive.set_meta(_BACKFILL_FROM_KEY, start_date)
-    logger.info("Historical backfill complete: wrote %d entries", written)
+
+    counts = _apply_window(archive, raw, start_date, end_date)
+    archive.record_history_check(complete=True, **counts)
+    if from_start:
+        archive.set_meta(_BACKFILL_FROM_KEY, start_date)
+    archive.set_meta(_HISTORY_CHECKED_KEY, datetime.now(tz=UTC).isoformat())
+    logger.info(
+        "History check: %d added, %d updated, %d removed, %d removals refused",
+        counts["added"],
+        counts["updated"],
+        counts["removed"],
+        counts["refused"],
+    )
     # Only trust a non-empty fetch: clearing after an empty one would
-    # permanently skip the re-backfill.
+    # permanently skip the description re-backfill.
     if missing_descriptions and raw:
         cleared = archive.clear_missing_descriptions()
         if cleared:
@@ -176,19 +223,19 @@ def _background_sync_loop() -> None:
 
     Runs in its own thread so a 402 can block on Toggl's real hourly quota
     reset (via TogglReportsClient's retry/backoff) without ever stalling a
-    live dashboard request. Same reasoning covers the one-time backfill,
-    which can take hours on the free tier's quota.
+    live dashboard request. Each hour: the 90-day sync, then the daily
+    full-history check when it is due (after the sync, so its counts are
+    corrections rather than entries the sync would have brought anyway).
     """
-    try:
-        _backfill_if_needed()
-    except Exception:
-        logger.exception("Historical backfill failed")
-
     while True:
         try:
             _sync_archive_once()
         except Exception:
             logger.exception("Background Toggl sync failed")
+        try:
+            _check_history_if_due()
+        except Exception:
+            logger.exception("History check against Toggl failed")
         time.sleep(_CACHE_TTL)
 
 
@@ -299,7 +346,7 @@ def health() -> dict:
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    if _last_sync_completed_at is not None:
+    if _last_sync_completed_at is not None and not _history_check_running:
         stale_for = time.monotonic() - _last_sync_completed_at
         if stale_for > _STALE_SYNC_AFTER_SECONDS:
             raise HTTPException(

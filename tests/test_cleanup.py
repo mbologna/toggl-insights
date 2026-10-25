@@ -343,6 +343,7 @@ class TestRunScheduled:
         max_writes: int = 12,
         quota: int | None = None,
         fail_on_delete: Exception | None = None,
+        history_checks: tuple[dict, ...] = ({"complete": True},),
     ):
         monkeypatch.delenv("TOGGL_IGNORED_DESCRIPTIONS", raising=False)
         monkeypatch.setenv("APPRISE_URL", "http://apprise/notify/x")
@@ -357,6 +358,10 @@ class TestRunScheduled:
         rows = [*_weekly_yoga(), *extra]
         archive = TogglArchive(str(tmp_path / "toggl.db"))
         archive.upsert(rows)
+        for i, check in enumerate(history_checks):
+            with patch("src.toggl.datetime", wraps=cleanup.datetime) as fake_dt:
+                fake_dt.now.return_value = cleanup.datetime.now(tz=cleanup.UTC) - cleanup.timedelta(hours=i + 1)
+                archive.record_history_check(**check)
         log = BackupLog(str(tmp_path / "backup.jsonl"))
         writer = FakeWriter({r["id"]: _remote(r) for r in rows}, log)
         writer.quota_remaining = quota
@@ -371,7 +376,7 @@ class TestRunScheduled:
         assert title == "Toggl cleanup"
         assert lines[0].startswith("Fixed 2 · undo: python -m src.cleanup --restore ")
         assert lines[1:3] == ["• 23 Jun Yoga: deleted a 20s entry", "• 24 Jun Yoga: deleted a 20s entry"]
-        assert lines[-1] == "1 left for next week (Toggl quota)"
+        assert lines[-2:] == ["1 left for next week (Toggl quota)", "History vs Toggl: matches"]
         assert self.writer.calls == [("delete", 1), ("delete", 2)]
 
     def test_daily_merge_is_reported(self, tmp_path, monkeypatch):
@@ -385,13 +390,34 @@ class TestRunScheduled:
     def test_lists_only_last_weeks_forgotten_timers(self, tmp_path, monkeypatch):
         longs = [_row(1, "2026-06-26", 4 * 3600), _row(2, "2026-06-10", 4 * 3600)]
         ((_, lines),) = self._run(tmp_path, monkeypatch, longs)
-        assert lines == ["To review (last 7 days):", "• 26 Jun Yoga: 4h 00m, forgotten timer?"]
+        assert lines == [
+            "To review (last 7 days):",
+            "• 26 Jun Yoga: 4h 00m, forgotten timer?",
+            "History vs Toggl: matches",
+        ]
         assert self.writer.calls == []
 
     def test_stops_before_a_change_the_quota_cannot_cover(self, tmp_path, monkeypatch):
         ((_, lines),) = self._run(tmp_path, monkeypatch, [_row(1, "2026-06-23", 20)], quota=2)
-        assert lines == ["Stopped early: only 2 Toggl requests left this hour", "1 left for next week (Toggl quota)"]
+        assert lines == [
+            "Stopped early: only 2 Toggl requests left this hour",
+            "1 left for next week (Toggl quota)",
+            "History vs Toggl: matches",
+        ]
         assert self.writer.calls == []
+
+    def test_history_corrections_alone_are_worth_a_message(self, tmp_path, monkeypatch):
+        checks = ({"complete": True, "added": 3, "removed": 1}, {"complete": True, "updated": 2}, {"complete": False})
+        ((_, lines),) = self._run(tmp_path, monkeypatch, [], history_checks=checks)
+        assert lines == ["History vs Toggl: 3 added, 2 updated, 1 removed this week"]
+
+    def test_no_complete_history_check_is_reported(self, tmp_path, monkeypatch):
+        ((_, lines),) = self._run(tmp_path, monkeypatch, [], history_checks=({"complete": False},))
+        assert lines == ["History vs Toggl: no complete check in the last 7 days"]
+
+    def test_refused_removal_is_reported(self, tmp_path, monkeypatch):
+        ((_, lines),) = self._run(tmp_path, monkeypatch, [], history_checks=({"complete": True, "refused": 40},))
+        assert lines[0].startswith("History vs Toggl: Toggl no longer returns 40 archived entries")
 
     def test_unexpected_error_is_reported_with_the_undo(self, tmp_path, monkeypatch):
         stubs = [_row(1, "2026-06-23", 20), _row(2, "2026-06-24", 20)]

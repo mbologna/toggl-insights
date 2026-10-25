@@ -1,8 +1,9 @@
-"""Unit tests for src.main's one-time historical backfill and HTTP endpoints."""
+"""Unit tests for src.main's archive sync, daily history check and HTTP endpoints."""
 
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -10,155 +11,131 @@ from fastapi.testclient import TestClient
 import src.main as main
 from src.toggl import TogglArchive, TogglReportsClient
 
+ROME = ZoneInfo("Europe/Rome")
 
-class TestBackfillIfNeeded:
-    """Test main._backfill_if_needed()."""
 
-    def test_runs_when_archive_is_empty(self, tmp_path, monkeypatch):
+def _entry(entry_id: int, start: str, description: str = "", duration: int = 60) -> dict:
+    return {
+        "id": entry_id,
+        "project_id": 1,
+        "description": description,
+        "start": start,
+        "stop": "x",
+        "duration": duration,
+    }
+
+
+class TestCheckHistoryIfDue:
+    """Test main._check_history_if_due(), the daily full-history comparison with Toggl."""
+
+    NOW = datetime(2026, 10, 25, 4, 0, tzinfo=ROME)
+
+    def _setup(self, tmp_path, monkeypatch, archived=(), fetched=(), complete=True):
         db_path = str(tmp_path / "toggl.db")
         monkeypatch.setattr(main, "_DB_PATH", db_path)
         monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2015-01-01")
-
+        monkeypatch.delenv("ALERT_TIMEZONE", raising=False)
+        archive = TogglArchive(db_path)
+        archive.upsert(list(archived))
         fake_client = Mock()
-        fake_client.fetch_window.return_value = (
-            [{"id": 1, "project_id": 1, "start": "2015-02-01T10:00:00Z", "stop": "x", "duration": 60}],
-            True,
+        fake_client.fetch_window.return_value = (list(fetched), complete)
+        monkeypatch.setattr(main, "_get_client", lambda: fake_client)
+        return archive, fake_client
+
+    def test_first_check_starts_from_the_configured_date(self, tmp_path, monkeypatch):
+        archive, client = self._setup(tmp_path, monkeypatch, fetched=[_entry(1, "2016-02-01T10:00:00Z")])
+        main._check_history_if_due(self.NOW)
+
+        assert client.fetch_window.call_args.args == ("2015-01-01", "2026-10-25")
+        assert archive.get_earliest_entry_time() == "2016-02-01T10:00:00Z"
+        assert archive.get_meta(main._BACKFILL_FROM_KEY) == "2015-01-01"
+        (check,) = archive.history_checks_since(self.NOW - timedelta(days=1))
+        assert (check["complete"], check["added"]) == (1, 1)
+
+    def test_once_per_local_day(self, tmp_path, monkeypatch):
+        _, client = self._setup(tmp_path, monkeypatch, fetched=[_entry(1, "2016-02-01T10:00:00Z")])
+        main._check_history_if_due(self.NOW)
+        main._check_history_if_due(self.NOW + timedelta(hours=10))  # a restart later the same day
+        assert client.fetch_window.call_count == 1
+
+    def test_next_day_waits_for_the_night_hour(self, tmp_path, monkeypatch):
+        _, client = self._setup(tmp_path, monkeypatch, fetched=[_entry(1, "2016-02-01T10:00:00Z")])
+        with patch.object(main, "datetime", wraps=datetime) as fake_dt:
+            fake_dt.now.return_value = self.NOW  # recorded as the last check
+            main._check_history_if_due(self.NOW)
+        main._check_history_if_due(datetime(2026, 10, 26, 2, 0, tzinfo=ROME))
+        assert client.fetch_window.call_count == 1
+        main._check_history_if_due(datetime(2026, 10, 26, 3, 0, tzinfo=ROME))
+        assert client.fetch_window.call_count == 2
+
+    def test_later_checks_start_the_day_before_the_earliest_entry(self, tmp_path, monkeypatch):
+        archive, client = self._setup(tmp_path, monkeypatch, archived=[_entry(1, "2024-09-02T18:00:00+02:00")])
+        archive.set_meta(main._BACKFILL_FROM_KEY, "2015-01-01")
+        main._check_history_if_due(self.NOW)
+        assert client.fetch_window.call_args.args == ("2024-09-01", "2026-10-25")
+
+    def test_repairs_and_counts(self, tmp_path, monkeypatch):
+        archived = [_entry(i, f"2025-0{i}-10T10:00:00+02:00") for i in range(1, 9)]
+        archived[1]["start"] = "2025-02-10T08:00:00+00:00"  # old format, fixed by the fetch
+        fetched = [_entry(i, f"2025-0{i}-10T10:00:00+02:00") for i in range(1, 8)]  # 8 deleted in Toggl
+        fetched.append(_entry(20, "2025-09-10T10:00:00+02:00"))  # missing locally
+        archive, _ = self._setup(tmp_path, monkeypatch, archived=archived, fetched=fetched)
+        archive.set_meta(main._BACKFILL_FROM_KEY, "2015-01-01")
+
+        main._check_history_if_due(self.NOW)
+
+        (check,) = archive.history_checks_since(self.NOW - timedelta(days=1))
+        assert {k: check[k] for k in ("added", "updated", "removed", "refused")} == {
+            "added": 1,
+            "updated": 1,
+            "removed": 1,
+            "refused": 0,
+        }
+        assert sorted(archive.rows_by_id()) == [1, 2, 3, 4, 5, 6, 7, 20]
+
+    def test_incomplete_fetch_removes_nothing_and_retries(self, tmp_path, monkeypatch):
+        archived = [_entry(1, "2025-01-10T10:00:00Z"), _entry(2, "2025-02-10T10:00:00Z")]
+        archive, client = self._setup(
+            tmp_path, monkeypatch, archived=archived, fetched=[_entry(3, "2025-03-10T10:00:00Z")], complete=False
         )
+        main._check_history_if_due(self.NOW)
+        main._check_history_if_due(self.NOW + timedelta(hours=1))
 
-        with patch.object(main, "_get_client", return_value=fake_client):
-            main._backfill_if_needed()
+        assert client.fetch_window.call_count == 2
+        assert sorted(archive.rows_by_id()) == [1, 2, 3]
+        assert archive.get_meta(main._HISTORY_CHECKED_KEY) is None
+        assert [c["complete"] for c in archive.history_checks_since(self.NOW - timedelta(days=1))] == [0, 0]
 
-        fake_client.fetch_window.assert_called_once()
-        start_date, end_date = fake_client.fetch_window.call_args.args
-        assert start_date == "2015-01-01"
+    def test_reruns_from_the_new_date_when_it_moves_earlier(self, tmp_path, monkeypatch):
+        archive, client = self._setup(tmp_path, monkeypatch)
+        archive.set_meta(main._BACKFILL_FROM_KEY, "2015-01-01")
+        archive.set_meta(main._HISTORY_CHECKED_KEY, self.NOW.astimezone(main.UTC).isoformat())
+        monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2010-01-01")
+        main._check_history_if_due(self.NOW)
+        assert client.fetch_window.call_args.args[0] == "2010-01-01"
 
-        archive = TogglArchive(db_path)
-        assert archive.get_earliest_entry_time() == "2015-02-01T10:00:00Z"
-
-    def test_skipped_when_archive_already_reaches_start_date(self, tmp_path, monkeypatch):
-        db_path = str(tmp_path / "toggl.db")
-        monkeypatch.setattr(main, "_DB_PATH", db_path)
-        monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2015-01-01")
-
-        archive = TogglArchive(db_path)
-        archive.upsert([{"id": 1, "project_id": 1, "start": "2014-06-01T10:00:00Z", "stop": "x", "duration": 60}])
-
-        fake_client = Mock()
-        with patch.object(main, "_get_client", return_value=fake_client):
-            main._backfill_if_needed()
-
-        fake_client.fetch_window.assert_not_called()
-
-    def test_runs_when_archive_does_not_reach_far_enough_back(self, tmp_path, monkeypatch):
-        db_path = str(tmp_path / "toggl.db")
-        monkeypatch.setattr(main, "_DB_PATH", db_path)
-        monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2015-01-01")
-
-        archive = TogglArchive(db_path)
-        archive.upsert([{"id": 1, "project_id": 1, "start": "2020-06-01T10:00:00Z", "stop": "x", "duration": 60}])
-
-        fake_client = Mock()
-        fake_client.fetch_window.return_value = ([], True)
-        with patch.object(main, "_get_client", return_value=fake_client):
-            main._backfill_if_needed()
-
-        fake_client.fetch_window.assert_called_once()
-
-    def test_reruns_from_earliest_entry_when_descriptions_missing(self, tmp_path, monkeypatch):
-        db_path = str(tmp_path / "toggl.db")
-        monkeypatch.setattr(main, "_DB_PATH", db_path)
-        monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2015-01-01")
-
-        archive = TogglArchive(db_path)
-        archive.upsert(
-            [
-                {"id": 1, "project_id": 1, "start": "2014-06-01T10:00:00Z", "stop": "x", "duration": 60},
-                {"id": 2, "project_id": 1, "start": "2020-06-01T10:00:00Z", "stop": "x", "duration": 60},
-            ]
+    def test_missing_descriptions_are_filled_and_cleared(self, tmp_path, monkeypatch):
+        archived = [_entry(1, "2014-06-01T10:00:00Z"), _entry(2, "2020-06-01T10:00:00Z")]
+        archive, _ = self._setup(
+            tmp_path, monkeypatch, archived=archived, fetched=[_entry(2, "2020-06-01T10:00:00Z", "Yoga")]
         )
-        with sqlite3.connect(db_path) as conn:
+        archive.set_meta(main._BACKFILL_FROM_KEY, "2015-01-01")
+        archive.set_meta(main._HISTORY_CHECKED_KEY, self.NOW.astimezone(main.UTC).isoformat())
+        with sqlite3.connect(main._DB_PATH) as conn:
             conn.execute("UPDATE time_entries SET description = NULL")
 
-        fake_client = Mock()
-        fake_client.fetch_window.return_value = (
-            [
-                {
-                    "id": 2,
-                    "project_id": 1,
-                    "description": "Yoga",
-                    "start": "2020-06-01T10:00:00Z",
-                    "stop": "x",
-                    "duration": 60,
-                },
-            ],
-            True,
-        )
-        with patch.object(main, "_get_client", return_value=fake_client):
-            main._backfill_if_needed()
+        main._check_history_if_due(self.NOW)
 
-        start_date, _ = fake_client.fetch_window.call_args.args
-        assert start_date == "2014-06-01"
         assert archive.get_description_entries("Yoga") == [{"start": "2020-06-01T10:00:00Z", "duration": 60}]
-        # id 1 wasn't returned (deleted upstream) — cleared so it can't retrigger this forever
+        # id 1 wasn't returned (deleted upstream): cleared so it can't retrigger this forever
         assert not archive.has_missing_descriptions()
 
     def test_keeps_missing_descriptions_when_fetch_returns_nothing(self, tmp_path, monkeypatch):
-        db_path = str(tmp_path / "toggl.db")
-        monkeypatch.setattr(main, "_DB_PATH", db_path)
-        monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2015-01-01")
-
-        archive = TogglArchive(db_path)
-        archive.upsert([{"id": 1, "project_id": 1, "start": "2014-06-01T10:00:00Z", "stop": "x", "duration": 60}])
-        with sqlite3.connect(db_path) as conn:
+        archive, _ = self._setup(tmp_path, monkeypatch, archived=[_entry(1, "2014-06-01T10:00:00Z")])
+        with sqlite3.connect(main._DB_PATH) as conn:
             conn.execute("UPDATE time_entries SET description = NULL")
-
-        fake_client = Mock()
-        fake_client.fetch_window.return_value = ([], True)
-        with patch.object(main, "_get_client", return_value=fake_client):
-            main._backfill_if_needed()
-
+        main._check_history_if_due(self.NOW)
         assert archive.has_missing_descriptions()
-
-    def test_not_repeated_when_history_starts_after_the_start_date(self, tmp_path, monkeypatch):
-        db_path = str(tmp_path / "toggl.db")
-        monkeypatch.setattr(main, "_DB_PATH", db_path)
-        monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2015-01-01")
-        fake_client = Mock()
-        # the oldest entry is from 2016: the archive never "reaches" 2015-01-01
-        fake_client.fetch_window.return_value = (
-            [{"id": 1, "project_id": 1, "start": "2016-03-01T10:00:00Z", "stop": "x", "duration": 60}],
-            True,
-        )
-        with patch.object(main, "_get_client", return_value=fake_client):
-            main._backfill_if_needed()
-            main._backfill_if_needed()
-
-        fake_client.fetch_window.assert_called_once()
-
-    def test_incomplete_backfill_is_retried(self, tmp_path, monkeypatch):
-        db_path = str(tmp_path / "toggl.db")
-        monkeypatch.setattr(main, "_DB_PATH", db_path)
-        monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2015-01-01")
-        fake_client = Mock()
-        fake_client.fetch_window.return_value = ([], False)
-        with patch.object(main, "_get_client", return_value=fake_client):
-            main._backfill_if_needed()
-            main._backfill_if_needed()
-
-        assert fake_client.fetch_window.call_count == 2
-
-    def test_reruns_when_the_start_date_moves_earlier(self, tmp_path, monkeypatch):
-        db_path = str(tmp_path / "toggl.db")
-        monkeypatch.setattr(main, "_DB_PATH", db_path)
-        TogglArchive(db_path).set_meta(main._BACKFILL_FROM_KEY, "2015-01-01")
-        monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2010-01-01")
-        fake_client = Mock()
-        fake_client.fetch_window.return_value = ([], True)
-        with patch.object(main, "_get_client", return_value=fake_client):
-            main._backfill_if_needed()
-
-        start_date, _ = fake_client.fetch_window.call_args.args
-        assert start_date == "2010-01-01"
 
 
 def _archived(entry_id: int, day: str) -> dict:
@@ -259,6 +236,11 @@ class TestHealth:
 
     def test_ok_when_sync_is_recent(self, client, monkeypatch):
         monkeypatch.setattr(main, "_last_sync_completed_at", main.time.monotonic())
+        assert client.get("/health").status_code == 200
+
+    def test_ok_while_a_history_check_holds_up_the_sync(self, client, monkeypatch):
+        monkeypatch.setattr(main, "_last_sync_completed_at", 0.0)
+        monkeypatch.setattr(main, "_history_check_running", True)
         assert client.get("/health").status_code == 200
 
     def test_503_when_sync_is_stale(self, client, monkeypatch):

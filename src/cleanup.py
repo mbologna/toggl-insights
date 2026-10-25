@@ -24,7 +24,8 @@ the last 12 weeks (thresholds in CleanupThresholds, overridable via CLEANUP_*):
 --scheduled applies stubs and daily merges, at most CLEANUP_MAX_WRITES Toggl
 writes per run (the free plan's quota is 30 workspace requests an hour, shared
 with the sync), and sends what it changed, plus forgotten timers from the last
-week, to APPRISE_URL. It stays silent when there is nothing to say.
+week and what the dashboard's daily history check against Toggl corrected, to
+APPRISE_URL. It stays silent when there is nothing to say.
 
 Every --apply change is preceded by a copy of the entry, as Toggl returns it,
 appended to the backup log (CLEANUP_BACKUP_PATH, default next to the
@@ -412,8 +413,33 @@ def _short_day(day: str) -> str:
     return f"{d.day} {d:%b}"
 
 
+def history_line(archive: TogglArchive, now: datetime) -> tuple[str, bool]:
+    """One line on the last week's daily history checks (main._check_history_if_due),
+    and whether it is worth a message on its own: corrections or a problem are,
+    a plain match only rides along."""
+    checks = archive.history_checks_since(now - timedelta(days=_REVIEW_DAYS))
+    complete = [c for c in checks if c["complete"]]
+    if not complete:
+        return f"History vs Toggl: no complete check in the last {_REVIEW_DAYS} days", True
+    added, updated, removed, refused = (sum(c[k] for c in complete) for k in ("added", "updated", "removed", "refused"))
+    if refused:
+        line = (
+            f"History vs Toggl: Toggl no longer returns {refused} archived entries, left in place "
+            "(too many at once to trust): check the workspace"
+        )
+        return line, True
+    if added or updated or removed:
+        return f"History vs Toggl: {added} added, {updated} updated, {removed} removed this week", True
+    return "History vs Toggl: matches", False
+
+
 def format_message(
-    applied: list[Candidate], review: list[Candidate], left: int, run_id: str, stopped: str | None
+    applied: list[Candidate],
+    review: list[Candidate],
+    left: int,
+    run_id: str,
+    stopped: str | None,
+    history: tuple[str, bool] | None = None,
 ) -> list[str]:
     """Body lines of the weekly message (empty: nothing worth sending)."""
     lines: list[str] = []
@@ -436,6 +462,10 @@ def format_message(
         lines.append(f"Stopped early: {stopped}")
     if left:
         lines.append(f"{left} left for next week (Toggl quota)")
+    if history is not None:
+        line, notable = history
+        if notable or lines:
+            lines.append(line)
     return _truncate(lines)
 
 
@@ -476,7 +506,7 @@ def run_scheduled(archive: TogglArchive, writer: TogglWriteClient, log: BackupLo
         raise SystemExit(1) from None
 
     left = len(now) - len(applied) + len(later)
-    lines = format_message(applied, review, left, run_id, stopped)
+    lines = format_message(applied, review, left, run_id, stopped, history_line(archive, datetime.now(tz=UTC)))
     if not lines:
         logger.info("Nothing to report.")
         return
