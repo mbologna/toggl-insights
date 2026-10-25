@@ -23,6 +23,9 @@ from src.toggl import (
     visit_stats,
 )
 
+# uvicorn only configures its own loggers: without a root handler, this app's
+# INFO lines (sync counts, removed entries) never reached the pod log.
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 load_dotenv()
