@@ -21,6 +21,9 @@ CACHE_TTL = 3600  # 1 hour
 RATE_LIMIT_MAX_RETRIES = 3
 RATE_LIMIT_RETRY_DELAY_SECONDS = 30  # fallback when Toggl doesn't send a reset hint
 RATE_LIMIT_RETRY_BUFFER_SECONDS = 2
+# Toggl's per-second leaky bucket (HTTP 429): its documented safe pace is 1 request/s.
+LEAKY_BUCKET_INTERVAL_SECONDS = 1.0
+LEAKY_BUCKET_RETRY_SECONDS = 2
 
 
 def _rate_limit_wait_seconds(response: requests.Response | None) -> int:
@@ -256,32 +259,66 @@ class TogglReportsClient:
         return [{"period": p, "hours": round(h, 4)} for p, h in sorted(buckets.items())]
 
 
+class TogglQuotaExhausted(Exception):
+    """Toggl's hourly quota ran out and the client was told not to wait for it."""
+
+
 class TogglWriteClient:
     """The few Toggl writes src.cleanup needs. Kept apart from TogglReportsClient,
     which the dashboard and alerts use and which never changes anything in Toggl.
 
-    Errors raise (after waiting out 402 quota limits like the reader does): a
-    cleanup run must stop at the first failed write, not carry on past it.
+    Errors raise: a cleanup run must stop at the first failed write, not carry on
+    past it. A 402 (hourly quota) is waited out like the reader does, or raises
+    TogglQuotaExhausted when wait_on_quota is False (a CronJob can't wait an
+    hour). Requests are paced to Toggl's 1/s leaky bucket, and a 429 is retried.
     """
 
     CREATED_WITH = "toggl-insights"
 
-    def __init__(self, api_token: str, workspace_id: int) -> None:
+    def __init__(self, api_token: str, workspace_id: int, wait_on_quota: bool = True) -> None:
         self.api_token = api_token
         self.workspace_id = workspace_id
+        self.wait_on_quota = wait_on_quota
+        # Workspace requests left this hour, from the last workspace response's
+        # X-Toggl-Quota-Remaining (None until one arrives). /me requests have a
+        # quota of their own, so they don't update it.
+        self.quota_remaining: int | None = None
+        self._next_request_at = 0.0
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict | None:
         for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
+            pause = self._next_request_at - time.monotonic()
+            if pause > 0:
+                time.sleep(pause)
             response = requests.request(
                 method, f"{BASE_URL}{path}", json=body, auth=(self.api_token, "api_token"), timeout=DEFAULT_TIMEOUT
             )
-            if response.status_code == 402 and attempt < RATE_LIMIT_MAX_RETRIES:
-                delay = _rate_limit_wait_seconds(response)
-                logger.warning(
-                    "Toggl rate limit reached. Retrying in %ds (%d/%d)...", delay, attempt + 1, RATE_LIMIT_MAX_RETRIES
-                )
-                time.sleep(delay)
+            self._next_request_at = time.monotonic() + LEAKY_BUCKET_INTERVAL_SECONDS
+            if not path.startswith("/me/"):
+                remaining = response.headers.get("x-toggl-quota-remaining")
+                if remaining is not None and remaining.isdigit():
+                    self.quota_remaining = int(remaining)
+            retrying = attempt < RATE_LIMIT_MAX_RETRIES
+            if response.status_code == 429 and retrying:
+                logger.warning("Toggl leaky bucket full. Retrying in %ds...", LEAKY_BUCKET_RETRY_SECONDS)
+                time.sleep(LEAKY_BUCKET_RETRY_SECONDS)
+                self._next_request_at = 0.0
                 continue
+            if response.status_code == 402:
+                if not self.wait_on_quota:
+                    reset_in = response.headers.get("x-toggl-quota-resets-in", "?")
+                    raise TogglQuotaExhausted(f"Toggl quota used up, resets in {reset_in}s")
+                if retrying:
+                    delay = _rate_limit_wait_seconds(response)
+                    logger.warning(
+                        "Toggl rate limit reached. Retrying in %ds (%d/%d)...",
+                        delay,
+                        attempt + 1,
+                        RATE_LIMIT_MAX_RETRIES,
+                    )
+                    time.sleep(delay)
+                    self._next_request_at = 0.0
+                    continue
             response.raise_for_status()
             return response.json() if response.content else None
         raise RuntimeError("unreachable: the last attempt always returns or raises")

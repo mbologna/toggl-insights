@@ -2,6 +2,7 @@
 
 import json
 from datetime import date
+from typing import cast
 from unittest.mock import Mock, patch
 
 import pytest
@@ -19,7 +20,13 @@ from src.cleanup import (
     find_spurious,
     is_once_a_day,
 )
-from src.toggl import RATE_LIMIT_RETRY_DELAY_SECONDS, TogglArchive, TogglWriteClient
+from src.toggl import (
+    LEAKY_BUCKET_RETRY_SECONDS,
+    RATE_LIMIT_RETRY_DELAY_SECONDS,
+    TogglArchive,
+    TogglQuotaExhausted,
+    TogglWriteClient,
+)
 
 THRESHOLDS = CleanupThresholds()
 
@@ -195,6 +202,8 @@ class FakeWriter:
         self.log = log
         self.calls: list[tuple] = []
         self.next_id = 9000
+        self.quota_remaining: int | None = None
+        self.fail_on_delete: Exception | None = None
 
     def get_entry(self, entry_id):
         return self.remote.get(entry_id)
@@ -202,6 +211,8 @@ class FakeWriter:
     def delete_entry(self, entry_id):
         # the backup must already hold this entry when Toggl deletes it
         assert any(r["entry"]["id"] == entry_id for r in self._logged())
+        if self.fail_on_delete:
+            raise self.fail_on_delete
         self.calls.append(("delete", entry_id))
         del self.remote[entry_id]
 
@@ -251,7 +262,7 @@ class TestApplyAndRestore:
             cleanup.Candidate(LONG, "Yoga", 3600, (rows[0],)),
         ]
 
-        assert cleanup.apply(candidates, writer, archive, log, "run1") == 2
+        assert len(list(cleanup.apply(candidates, writer, archive, log, "run1"))) == 2
 
         assert writer.calls == [("delete", 3), ("update", 1, 3300), ("delete", 2)]
         assert self._ids(archive) == [1]
@@ -271,15 +282,125 @@ class TestApplyAndRestore:
         archive, log, writer = self._setup(tmp_path, rows)
         writer.remote.clear()
 
-        cleanup.apply([cleanup.Candidate(STUB, "Yoga", 3600, (rows[0],))], writer, archive, log, "run1")
+        list(cleanup.apply([cleanup.Candidate(STUB, "Yoga", 3600, (rows[0],))], writer, archive, log, "run1"))
 
         assert writer.calls == []
         assert self._ids(archive) == []
+
+    def test_restore_skips_a_delete_that_never_happened(self, tmp_path):
+        rows = [_row(1, "2026-06-02", 10)]
+        archive, log, writer = self._setup(tmp_path, rows)
+        writer.fail_on_delete = RuntimeError("boom")
+        with pytest.raises(RuntimeError):
+            list(cleanup.apply([cleanup.Candidate(STUB, "Yoga", 3600, (rows[0],))], writer, archive, log, "run1"))
+
+        assert cleanup.restore("run1", writer, archive, log) == 1
+        assert writer.calls == []  # still in Toggl: not re-created
 
     def test_restore_unknown_run(self, tmp_path):
         archive, log, writer = self._setup(tmp_path, [])
         with pytest.raises(SystemExit, match="No changes"):
             cleanup.restore("nope", writer, archive, log)
+
+
+class TestWithinBudget:
+    @staticmethod
+    def _c(rule: str, n: int) -> cleanup.Candidate:
+        return cleanup.Candidate(rule, "Yoga", 3600, tuple(_e(i, "2026-06-01T10:00:00+02:00", 60) for i in range(n)))
+
+    def test_counts_writes_and_never_splits_a_merge(self):
+        stubs = [self._c(STUB, 1) for _ in range(3)]
+        merge = self._c(DAILY, 3)
+        now, later = cleanup.within_budget([*stubs, merge, self._c(LONG, 1)], max_writes=4)
+        assert now == stubs
+        assert later == [merge]
+
+    def test_keeps_order_once_one_is_left_out(self):
+        merge, stub = self._c(DAILY, 3), self._c(STUB, 1)
+        now, later = cleanup.within_budget([self._c(STUB, 1), merge, stub], max_writes=3)
+        assert len(now) == 1
+        assert later == [merge, stub]
+
+    def test_one_candidate_over_the_whole_budget_still_goes(self):
+        merge = self._c(DAILY, 6)
+        assert cleanup.within_budget([merge], max_writes=4) == ([merge], [])
+
+
+class TestTruncate:
+    def test_cuts_with_a_count(self, monkeypatch):
+        monkeypatch.setattr(cleanup, "_MESSAGE_MAX_CHARS", 25)
+        assert cleanup._truncate(["a" * 10, "b" * 10, "c" * 10, "d"]) == ["a" * 10, "b" * 10, "…and 2 more"]
+
+
+class TestRunScheduled:
+    TODAY = date(2026, 6, 29)
+
+    def _run(
+        self,
+        tmp_path,
+        monkeypatch,
+        extra: list[dict],
+        max_writes: int = 12,
+        quota: int | None = None,
+        fail_on_delete: Exception | None = None,
+    ):
+        monkeypatch.delenv("TOGGL_IGNORED_DESCRIPTIONS", raising=False)
+        monkeypatch.setenv("APPRISE_URL", "http://apprise/notify/x")
+        monkeypatch.setenv("CLEANUP_MAX_WRITES", str(max_writes))
+        self.sent: list[tuple[str, list[str]]] = []
+
+        def send(url: str, title: str, lines: list[str]) -> bool:
+            self.sent.append((title, lines))
+            return True
+
+        monkeypatch.setattr(cleanup, "_send_alert", send)
+        rows = [*_weekly_yoga(), *extra]
+        archive = TogglArchive(str(tmp_path / "toggl.db"))
+        archive.upsert(rows)
+        log = BackupLog(str(tmp_path / "backup.jsonl"))
+        writer = FakeWriter({r["id"]: _remote(r) for r in rows}, log)
+        writer.quota_remaining = quota
+        writer.fail_on_delete = fail_on_delete
+        self.writer = writer
+        cleanup.run_scheduled(archive, cast(TogglWriteClient, writer), log, self.TODAY)
+        return self.sent
+
+    def test_applies_within_the_budget_and_reports(self, tmp_path, monkeypatch):
+        stubs = [_row(1, "2026-06-23", 20), _row(2, "2026-06-24", 20), _row(3, "2026-06-25", 20)]
+        ((title, lines),) = self._run(tmp_path, monkeypatch, stubs, max_writes=2)
+        assert title == "Toggl cleanup"
+        assert lines[0].startswith("Fixed 2 · undo: python -m src.cleanup --restore ")
+        assert lines[1:3] == ["• 23 Jun Yoga: deleted a 20s entry", "• 24 Jun Yoga: deleted a 20s entry"]
+        assert lines[-1] == "1 left for next week (Toggl quota)"
+        assert self.writer.calls == [("delete", 1), ("delete", 2)]
+
+    def test_daily_merge_is_reported(self, tmp_path, monkeypatch):
+        split = [_row(1, "2026-06-24", 1800), _row(2, "2026-06-24", 1500, hour=11)]
+        ((_, lines),) = self._run(tmp_path, monkeypatch, split)
+        assert lines[1] == "• 24 Jun Yoga: merged 2 entries → 55m"
+
+    def test_silent_when_nothing_to_report(self, tmp_path, monkeypatch):
+        assert self._run(tmp_path, monkeypatch, []) == []
+
+    def test_lists_only_last_weeks_forgotten_timers(self, tmp_path, monkeypatch):
+        longs = [_row(1, "2026-06-26", 4 * 3600), _row(2, "2026-06-10", 4 * 3600)]
+        ((_, lines),) = self._run(tmp_path, monkeypatch, longs)
+        assert lines == ["To review (last 7 days):", "• 26 Jun Yoga: 4h 00m, forgotten timer?"]
+        assert self.writer.calls == []
+
+    def test_stops_before_a_change_the_quota_cannot_cover(self, tmp_path, monkeypatch):
+        ((_, lines),) = self._run(tmp_path, monkeypatch, [_row(1, "2026-06-23", 20)], quota=2)
+        assert lines == ["Stopped early: only 2 Toggl requests left this hour", "1 left for next week (Toggl quota)"]
+        assert self.writer.calls == []
+
+    def test_unexpected_error_is_reported_with_the_undo(self, tmp_path, monkeypatch):
+        stubs = [_row(1, "2026-06-23", 20), _row(2, "2026-06-24", 20)]
+        with pytest.raises(SystemExit) as exc:
+            self._run(tmp_path, monkeypatch, stubs, fail_on_delete=RuntimeError("boom"))
+        assert exc.value.code == 1
+        ((title, lines),) = self.sent
+        assert title == "Toggl cleanup"
+        assert lines[0].startswith("Stopped: boom. Undo what it changed with --restore ")
 
 
 class TestMain:
@@ -356,6 +477,40 @@ class TestTogglWriteClient:
             with patch("time.sleep") as sleep:
                 assert TogglWriteClient("token", 123).get_entry(1) == {"id": 1}
         sleep.assert_called_once_with(RATE_LIMIT_RETRY_DELAY_SECONDS)
+
+    def test_quota_raises_instead_of_waiting_when_told_to(self):
+        client = TogglWriteClient("token", 123, wait_on_quota=False)
+        with patch("requests.request", return_value=_response(402, headers={"x-toggl-quota-resets-in": "900"})):
+            with patch("time.sleep") as sleep:
+                with pytest.raises(TogglQuotaExhausted, match="900"):
+                    client.delete_entry(1)
+        sleep.assert_not_called()
+
+    def test_leaky_bucket_429_is_retried(self):
+        with patch("requests.request", side_effect=[_response(429), _response(200, {"id": 1})]):
+            with patch("time.sleep") as sleep:
+                assert TogglWriteClient("token", 123).get_entry(1) == {"id": 1}
+        sleep.assert_called_once_with(LEAKY_BUCKET_RETRY_SECONDS)
+
+    def test_tracks_the_workspace_quota_only(self):
+        client = TogglWriteClient("token", 123)
+        with (
+            patch("requests.request", return_value=_response(200, {"id": 1}, {"x-toggl-quota-remaining": "7"})),
+            patch("time.sleep"),
+        ):
+            client.get_entry(1)  # /me/... has a quota of its own
+            assert client.quota_remaining is None
+            client.delete_entry(1)
+        assert client.quota_remaining == 7
+
+    def test_paces_back_to_back_requests(self):
+        client = TogglWriteClient("token", 123)
+        with patch("requests.request", return_value=_response(200)):
+            with patch("time.sleep") as sleep:
+                client.delete_entry(1)
+                client.delete_entry(2)
+        (pause,) = sleep.call_args.args
+        assert 0 < pause <= 1
 
     def test_other_errors_raise(self):
         with patch("requests.request", return_value=_response(500)):

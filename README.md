@@ -71,7 +71,7 @@ Projects are discovered dynamically from Toggl (`GET /me/projects`, cached 24h)
 |---|---|---|---|---|
 | `TOGGL_API_TOKEN` | yes | — | all | Toggl API token (Profile → API Token) |
 | `TOGGL_WORKSPACE_ID` | yes | — | all | Numeric Toggl workspace ID |
-| `APPRISE_URL` | yes (alerts only) | — | alerts | Apprise notify endpoint |
+| `APPRISE_URL` | yes (alerts, scheduled cleanup) | — | alerts, cleanup | Apprise notify endpoint |
 | `TOGGL_DB_PATH` | no | `/data/toggl.db` | all | SQLite archive path |
 | `TOGGL_HISTORY_START_DATE` | no | `2006-01-01` | dashboard | How far back the one-time backfill reaches |
 | `TOGGL_DAILY_TARGET_HOURS` | no | — | dashboard | Daily hours target shown on the Overview tab |
@@ -88,6 +88,7 @@ Projects are discovered dynamically from Toggl (`GET /me/projects`, cached 24h)
 | `CLEANUP_STUB_RATIO` / `CLEANUP_STUB_MIN_SECS` | no | `0.10` / `60` | cleanup | An entry shorter than this share of its activity's median, or than this many seconds, is a stub |
 | `CLEANUP_DAILY_RATIO` / `CLEANUP_DAILY_MIN_DAYS` | no | `0.9` / `8` | cleanup | An activity is once a day (same-day entries get merged) when at least this share of its days, over at least this many days in 12 weeks, have a single entry |
 | `CLEANUP_LONG_RATIO` / `CLEANUP_LONG_MIN_SECS` | no | `3` / `7200` | cleanup | An entry longer than both is reported as a forgotten timer |
+| `CLEANUP_MAX_WRITES` | no | `12` | cleanup | Toggl writes one `--scheduled` run may make (the free plan allows 30 workspace requests an hour, shared with the sync) |
 | `CLEANUP_BACKUP_PATH` | no | `cleanup-backup.jsonl` next to `TOGGL_DB_PATH` | cleanup | Backup log that `--restore` replays |
 
 See `.env.template` for a copy-pasteable starting point.
@@ -204,10 +205,20 @@ python -m src.cleanup --restore 20261024T210000Z
 `--since` (default: 90 days ago), `--description` (matched like the API) and `--limit`
 narrow a run. Today is never touched, because a timer may still be running.
 
+`--scheduled` is the weekly CronJob. It applies stubs and once-a-day merges
+(merges first), at most `CLEANUP_MAX_WRITES` Toggl writes per run, and leaves
+the rest for the next run. It only starts a change the remaining hourly quota
+can finish, so a merge is never cut off half-way. Then it sends one message
+through `APPRISE_URL` listing what it changed, the restore command, and any
+forgotten timers from the last 7 days. It sends nothing when there is nothing
+to say. Requests are paced to Toggl's one-per-second limit, and a 429 is
+retried.
+
 Toggl has no trash, so `--apply` first appends Toggl's own copy of every
 entry it changes to the backup log, and only then edits or deletes the entry.
 `--restore RUN_ID` replays the log: merged entries get their original
-duration back, and deleted ones are re-created with a new id. Each change is
+duration back, and deleted ones are re-created with a new id. An entry whose
+delete failed (and so is still in Toggl) is skipped, not duplicated. Each change is
 one or two API calls, and they count against the same hourly quota as the
 sync; on a 402 the run waits for the quota to reset.
 

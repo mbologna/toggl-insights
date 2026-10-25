@@ -4,6 +4,7 @@ Usage:
     python -m src.cleanup                        # report only: list what would change
     python -m src.cleanup --apply [--limit N]    # change it in Toggl and the archive
     python -m src.cleanup --restore RUN_ID       # undo an --apply run
+    python -m src.cleanup --scheduled            # weekly CronJob: apply within a budget, report via Apprise
     options: --since YYYY-MM-DD (default: 90 days ago), --description WORDS,
              --rule stub|daily|long (only that rule)
 
@@ -20,6 +21,11 @@ the last 12 weeks (thresholds in CleanupThresholds, overridable via CLEANUP_*):
 - long: far longer than usual (a timer left running) -> reported only, since
   the real stop time is unknown; fix it in Toggl
 
+--scheduled applies stubs and daily merges, at most CLEANUP_MAX_WRITES Toggl
+writes per run (the free plan's quota is 30 workspace requests an hour, shared
+with the sync), and sends what it changed, plus forgotten timers from the last
+week, to APPRISE_URL. It stays silent when there is nothing to say.
+
 Every --apply change is preceded by a copy of the entry, as Toggl returns it,
 appended to the backup log (CLEANUP_BACKUP_PATH, default next to the
 archive); --restore replays the log. Toggl has no trash, so the log is the only
@@ -31,6 +37,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
@@ -39,9 +46,11 @@ from dotenv import load_dotenv
 # Allow running as `python src/cleanup.py` from project root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from src.alerts import _send_alert  # noqa: E402
 from src.toggl import (  # noqa: E402
     REPORT_ROUTINES,
     TogglArchive,
+    TogglQuotaExhausted,
     TogglReportsClient,
     TogglWriteClient,
     _parse_iso,
@@ -60,6 +69,12 @@ STUB = "stub"
 DAILY = "daily"
 LONG = "long"
 _MEDIAN_WEEKS = 12
+_SCAN_DAYS = 90
+_DEFAULT_MAX_WRITES = 12
+# Workspace requests to leave unused, for the hourly sync running meanwhile.
+_QUOTA_MARGIN = 2
+_REVIEW_DAYS = 7
+_MESSAGE_MAX_CHARS = 3500  # under Telegram's 4096 limit, with room for the title
 
 
 @dataclass(frozen=True)
@@ -126,6 +141,12 @@ class Candidate:
     def day(self) -> str:
         return self.entries[0]["start"][:10]
 
+    @property
+    def writes(self) -> int:
+        """Toggl write requests applying it takes: one delete per stub; for a daily
+        merge, one update plus one delete per other entry."""
+        return len(self.entries)
+
 
 def _interval(entry: dict) -> tuple[datetime, datetime]:
     start = _parse_iso(entry["start"])
@@ -182,7 +203,8 @@ def find_spurious(scan: Scan, thresholds: CleanupThresholds) -> list[Candidate]:
             else:
                 candidates += [Candidate(STUB, description, median, (e,)) for e in rest if e["duration"] < stub_below]
 
-    order = {STUB: 0, DAILY: 1, LONG: 2}
+    # Merges first: when the weekly budget runs out, they matter more to the stats than stubs.
+    order = {DAILY: 0, STUB: 1, LONG: 2}
     return sorted(candidates, key=lambda c: (order[c.rule], c.entries[0]["start"]))
 
 
@@ -231,8 +253,8 @@ def _secs(seconds: int) -> str:
 
 def format_report(candidates: list[Candidate]) -> str:
     sections = {
-        STUB: "Stubs, to delete",
         DAILY: "Same-day entries of a once-a-day activity, to merge into the first",
+        STUB: "Stubs, to delete",
         LONG: "Forgotten timers, to fix by hand in Toggl (report only)",
     }
     lines: list[str] = []
@@ -272,16 +294,25 @@ class BackupLog:
 
 
 def apply(
-    candidates: list[Candidate], writer: TogglWriteClient, archive: TogglArchive, log: BackupLog, run_id: str
-) -> int:
-    """Carry out the stub and daily candidates; returns how many were applied.
+    candidates: list[Candidate],
+    writer: TogglWriteClient,
+    archive: TogglArchive,
+    log: BackupLog,
+    run_id: str,
+    guard_quota: bool = False,
+) -> Iterator[Candidate]:
+    """Carry out the stub and daily candidates, yielding each one once applied.
 
     Each change is logged (with Toggl's full copy of the entry) before it is
-    made, so --restore can undo a run even if it stopped half-way."""
-    applied = 0
+    made, so --restore can undo a run even if it stopped half-way. With
+    guard_quota, a candidate is only started when the quota left covers all of
+    it (raising TogglQuotaExhausted otherwise): a daily merge cut off half-way
+    would leave the grown entry next to pieces it already counts."""
     for c in candidates:
         if c.rule == LONG:
             continue
+        if guard_quota and writer.quota_remaining is not None and writer.quota_remaining < c.writes + _QUOTA_MARGIN:
+            raise TogglQuotaExhausted(f"only {writer.quota_remaining} Toggl requests left this hour")
         keep, drop = (c.entries[0], c.entries[1:]) if c.rule == DAILY else (None, c.entries)
         if keep is not None:
             original = writer.get_entry(keep["id"])
@@ -318,13 +349,16 @@ def apply(
             )
             writer.delete_entry(entry["id"])
             archive.delete_ids([entry["id"]])
-        applied += 1
         logger.info("Applied %s on %s: %s", c.rule, c.day, c.description)
-    return applied
+        yield c
 
 
 def restore(run_id: str, writer: TogglWriteClient, archive: TogglArchive, log: BackupLog) -> int:
-    """Undo an --apply run, newest change first. Deleted entries come back with new ids."""
+    """Undo an --apply run, newest change first. Deleted entries come back with new ids.
+
+    A record is written before its change, so a run that failed on a delete
+    logged one that never happened: entries still in Toggl are skipped, not
+    duplicated."""
     records = log.records(run_id)
     if any(r["action"] == "restored" for r in records):
         raise SystemExit(f"Run {run_id} was already restored.")
@@ -337,6 +371,8 @@ def restore(run_id: str, writer: TogglWriteClient, archive: TogglArchive, log: B
         if record["action"] == "update":
             writer.update_duration(original["id"], original["start"], original["duration"])
             archive.set_duration(original["id"], original["duration"])
+        elif writer.get_entry(original["id"]) is not None:
+            logger.info("#%d is still in Toggl (its delete never happened); skipped", original["id"])
         else:
             created = writer.create_entry(original)
             archive.upsert(
@@ -355,6 +391,98 @@ def restore(run_id: str, writer: TogglWriteClient, archive: TogglArchive, log: B
     return len(changes)
 
 
+def within_budget(candidates: list[Candidate], max_writes: int) -> tuple[list[Candidate], list[Candidate]]:
+    """Split the applicable candidates into (this run, left for later) by write
+    count, never splitting one. A single candidate over the whole budget still
+    goes first, or it would never be applied."""
+    now: list[Candidate] = []
+    later: list[Candidate] = []
+    used = 0
+    for c in (c for c in candidates if c.rule != LONG):
+        if not later and (used + c.writes <= max_writes or not now):
+            now.append(c)
+            used += c.writes
+        else:
+            later.append(c)
+    return now, later
+
+
+def _short_day(day: str) -> str:
+    d = date.fromisoformat(day)
+    return f"{d.day} {d:%b}"
+
+
+def format_message(
+    applied: list[Candidate], review: list[Candidate], left: int, run_id: str, stopped: str | None
+) -> list[str]:
+    """Body lines of the weekly message (empty: nothing worth sending)."""
+    lines: list[str] = []
+    if applied:
+        lines.append(f"Fixed {len(applied)} · undo: python -m src.cleanup --restore {run_id}")
+        for c in applied:
+            what = (
+                f"merged {len(c.entries)} entries → {_secs(c.merged_secs)}"
+                if c.rule == DAILY
+                else f"deleted a {_secs(c.entries[0]['duration'])} entry"
+            )
+            lines.append(f"• {_short_day(c.day)} {c.description}: {what}")
+    if review:
+        lines.append(f"To review (last {_REVIEW_DAYS} days):")
+        lines += [
+            f"• {_short_day(c.day)} {c.description}: {_secs(c.entries[0]['duration'])}, forgotten timer?"
+            for c in review
+        ]
+    if stopped:
+        lines.append(f"Stopped early: {stopped}")
+    if left:
+        lines.append(f"{left} left for next week (Toggl quota)")
+    return _truncate(lines)
+
+
+def _truncate(lines: list[str]) -> list[str]:
+    kept: list[str] = []
+    size = 0
+    for i, line in enumerate(lines):
+        if size + len(line) + 1 > _MESSAGE_MAX_CHARS:
+            return [*kept, f"…and {len(lines) - i} more"]
+        kept.append(line)
+        size += len(line) + 1
+    return kept
+
+
+def run_scheduled(archive: TogglArchive, writer: TogglWriteClient, log: BackupLog, today: date) -> None:
+    """The weekly CronJob: apply what fits the budget, then report it."""
+    thresholds = CleanupThresholds.from_env()
+    max_writes = int(os.environ.get("CLEANUP_MAX_WRITES") or _DEFAULT_MAX_WRITES)
+    apprise_url = os.environ["APPRISE_URL"]
+    candidates = find_spurious(
+        collect(archive, today, today - timedelta(days=_SCAN_DAYS), None, thresholds), thresholds
+    )
+    review = [c for c in candidates if c.rule == LONG and c.day >= (today - timedelta(days=_REVIEW_DAYS)).isoformat()]
+    now, later = within_budget(candidates, max_writes)
+
+    run_id = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+    applied: list[Candidate] = []
+    stopped = None
+    try:
+        for c in apply(now, writer, archive, log, run_id, guard_quota=True):
+            applied.append(c)
+    except TogglQuotaExhausted as exc:
+        stopped = str(exc)
+    except Exception as exc:
+        logger.exception("Cleanup run %s failed", run_id)
+        undo = f" Undo what it changed with --restore {run_id}." if log.records(run_id) else ""
+        _send_alert(apprise_url, "Toggl cleanup", [f"Stopped: {exc}.{undo}"])
+        raise SystemExit(1) from None
+
+    left = len(now) - len(applied) + len(later)
+    lines = format_message(applied, review, left, run_id, stopped)
+    if not lines:
+        logger.info("Nothing to report.")
+        return
+    _send_alert(apprise_url, "Toggl cleanup", lines)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--since", type=date.fromisoformat, help="first day to scan (default: 90 days ago)")
@@ -363,6 +491,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--rule", choices=[STUB, DAILY, LONG], help="only findings of this rule")
     parser.add_argument("--limit", type=int, help="apply at most this many findings")
     parser.add_argument("--restore", metavar="RUN_ID", help="undo an --apply run")
+    parser.add_argument("--scheduled", action="store_true", help="weekly CronJob mode (see above)")
     args = parser.parse_args(argv)
 
     db_path = os.environ.get("TOGGL_DB_PATH", "/data/toggl.db")
@@ -371,8 +500,12 @@ def main(argv: list[str] | None = None) -> None:
         os.environ.get("CLEANUP_BACKUP_PATH") or os.path.join(os.path.dirname(db_path), "cleanup-backup.jsonl")
     )
 
-    def writer() -> TogglWriteClient:
-        return TogglWriteClient(os.environ["TOGGL_API_TOKEN"], int(os.environ["TOGGL_WORKSPACE_ID"]))
+    def writer(wait_on_quota: bool = True) -> TogglWriteClient:
+        return TogglWriteClient(os.environ["TOGGL_API_TOKEN"], int(os.environ["TOGGL_WORKSPACE_ID"]), wait_on_quota)
+
+    if args.scheduled:
+        run_scheduled(archive, writer(wait_on_quota=False), log, date.today())
+        return
 
     if args.restore:
         count = restore(args.restore, writer(), archive, log)
@@ -399,7 +532,7 @@ def main(argv: list[str] | None = None) -> None:
     run_id = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
     print(f"\nApplying {len(actionable)} as run {run_id} (backup: {log.path})")
     try:
-        applied = apply(actionable, writer(), archive, log, run_id)
+        applied = sum(1 for _ in apply(actionable, writer(), archive, log, run_id))
     except Exception:
         logger.exception("Stopped at the first failed change; undo the partial run with --restore %s", run_id)
         raise SystemExit(1) from None
