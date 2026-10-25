@@ -39,6 +39,8 @@ _DB_PATH = os.environ.get("TOGGL_DB_PATH", "/data/toggl.db")
 # directly against the live API), so this can safely be set deep in the past
 # — an empty 366-day chunk still only costs one quota request.
 _TOGGL_HISTORY_START_DATE = os.environ.get("TOGGL_HISTORY_START_DATE", "2006-01-01")
+# meta key: start date of the last complete historical backfill.
+_BACKFILL_FROM_KEY = "backfill_from"
 
 _CACHE_TTL = 3600  # 1 hour
 _api_cache: dict[str, tuple[float, dict]] = {}
@@ -124,9 +126,13 @@ def _remove_deleted_entries(archive: TogglArchive, raw: list[dict], start_date: 
 def _backfill_if_needed() -> None:
     """One-time historical backfill back to TOGGL_HISTORY_START_DATE.
 
-    fetch_raw/_fetch_entries already chunk any range into <=366-day windows
-    internally, so this is just one call — skipped once the archive's
-    earliest entry already reaches that far back.
+    fetch_window already chunks any range into <=366-day windows, so this is
+    just one call. It is skipped once a complete backfill from that date (or
+    earlier) is recorded in the archive's meta table, or the earliest archived
+    entry already reaches that far back. The earliest entry alone isn't enough:
+    when the Toggl history starts after TOGGL_HISTORY_START_DATE it never
+    reaches it, and the backfill re-ran (about a dozen quota requests) on every
+    restart.
 
     Also re-runs once (from the earliest archived entry, if older) when rows
     archived before the description column existed still lack one, so
@@ -134,7 +140,10 @@ def _backfill_if_needed() -> None:
     """
     archive = TogglArchive(_DB_PATH)
     earliest = archive.get_earliest_entry_time()
-    reaches_start = earliest is not None and earliest[:10] <= _TOGGL_HISTORY_START_DATE
+    backfilled_from = archive.get_meta(_BACKFILL_FROM_KEY)
+    reaches_start = (backfilled_from is not None and backfilled_from <= _TOGGL_HISTORY_START_DATE) or (
+        earliest is not None and earliest[:10] <= _TOGGL_HISTORY_START_DATE
+    )
     missing_descriptions = archive.has_missing_descriptions()
     if reaches_start and not missing_descriptions:
         return
@@ -147,11 +156,15 @@ def _backfill_if_needed() -> None:
     today = date.today().strftime("%Y-%m-%d")
     reason = "description re-backfill" if reaches_start else "historical backfill"
     logger.info("Starting one-time %s from %s to %s", reason, start_date, today)
-    raw = client.fetch_raw(start_date, today)
+    raw, complete = client.fetch_window(start_date, today)
     written = archive.upsert(raw)
+    if not complete:
+        logger.warning("Historical backfill incomplete (wrote %d entries); retrying on the next start", written)
+        return
+    archive.set_meta(_BACKFILL_FROM_KEY, start_date)
     logger.info("Historical backfill complete: wrote %d entries", written)
-    # Only trust a non-empty fetch: fetch_raw returns [] on API errors, and
-    # clearing then would permanently skip the re-backfill.
+    # Only trust a non-empty fetch: clearing after an empty one would
+    # permanently skip the re-backfill.
     if missing_descriptions and raw:
         cleared = archive.clear_missing_descriptions()
         if cleared:

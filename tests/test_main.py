@@ -20,15 +20,16 @@ class TestBackfillIfNeeded:
         monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2015-01-01")
 
         fake_client = Mock()
-        fake_client.fetch_raw.return_value = [
-            {"id": 1, "project_id": 1, "start": "2015-02-01T10:00:00Z", "stop": "x", "duration": 60},
-        ]
+        fake_client.fetch_window.return_value = (
+            [{"id": 1, "project_id": 1, "start": "2015-02-01T10:00:00Z", "stop": "x", "duration": 60}],
+            True,
+        )
 
         with patch.object(main, "_get_client", return_value=fake_client):
             main._backfill_if_needed()
 
-        fake_client.fetch_raw.assert_called_once()
-        start_date, end_date = fake_client.fetch_raw.call_args.args
+        fake_client.fetch_window.assert_called_once()
+        start_date, end_date = fake_client.fetch_window.call_args.args
         assert start_date == "2015-01-01"
 
         archive = TogglArchive(db_path)
@@ -46,7 +47,7 @@ class TestBackfillIfNeeded:
         with patch.object(main, "_get_client", return_value=fake_client):
             main._backfill_if_needed()
 
-        fake_client.fetch_raw.assert_not_called()
+        fake_client.fetch_window.assert_not_called()
 
     def test_runs_when_archive_does_not_reach_far_enough_back(self, tmp_path, monkeypatch):
         db_path = str(tmp_path / "toggl.db")
@@ -57,11 +58,11 @@ class TestBackfillIfNeeded:
         archive.upsert([{"id": 1, "project_id": 1, "start": "2020-06-01T10:00:00Z", "stop": "x", "duration": 60}])
 
         fake_client = Mock()
-        fake_client.fetch_raw.return_value = []
+        fake_client.fetch_window.return_value = ([], True)
         with patch.object(main, "_get_client", return_value=fake_client):
             main._backfill_if_needed()
 
-        fake_client.fetch_raw.assert_called_once()
+        fake_client.fetch_window.assert_called_once()
 
     def test_reruns_from_earliest_entry_when_descriptions_missing(self, tmp_path, monkeypatch):
         db_path = str(tmp_path / "toggl.db")
@@ -79,20 +80,23 @@ class TestBackfillIfNeeded:
             conn.execute("UPDATE time_entries SET description = NULL")
 
         fake_client = Mock()
-        fake_client.fetch_raw.return_value = [
-            {
-                "id": 2,
-                "project_id": 1,
-                "description": "Yoga",
-                "start": "2020-06-01T10:00:00Z",
-                "stop": "x",
-                "duration": 60,
-            },
-        ]
+        fake_client.fetch_window.return_value = (
+            [
+                {
+                    "id": 2,
+                    "project_id": 1,
+                    "description": "Yoga",
+                    "start": "2020-06-01T10:00:00Z",
+                    "stop": "x",
+                    "duration": 60,
+                },
+            ],
+            True,
+        )
         with patch.object(main, "_get_client", return_value=fake_client):
             main._backfill_if_needed()
 
-        start_date, _ = fake_client.fetch_raw.call_args.args
+        start_date, _ = fake_client.fetch_window.call_args.args
         assert start_date == "2014-06-01"
         assert archive.get_description_entries("Yoga") == [{"start": "2020-06-01T10:00:00Z", "duration": 60}]
         # id 1 wasn't returned (deleted upstream) — cleared so it can't retrigger this forever
@@ -109,11 +113,52 @@ class TestBackfillIfNeeded:
             conn.execute("UPDATE time_entries SET description = NULL")
 
         fake_client = Mock()
-        fake_client.fetch_raw.return_value = []
+        fake_client.fetch_window.return_value = ([], True)
         with patch.object(main, "_get_client", return_value=fake_client):
             main._backfill_if_needed()
 
         assert archive.has_missing_descriptions()
+
+    def test_not_repeated_when_history_starts_after_the_start_date(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "toggl.db")
+        monkeypatch.setattr(main, "_DB_PATH", db_path)
+        monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2015-01-01")
+        fake_client = Mock()
+        # the oldest entry is from 2016: the archive never "reaches" 2015-01-01
+        fake_client.fetch_window.return_value = (
+            [{"id": 1, "project_id": 1, "start": "2016-03-01T10:00:00Z", "stop": "x", "duration": 60}],
+            True,
+        )
+        with patch.object(main, "_get_client", return_value=fake_client):
+            main._backfill_if_needed()
+            main._backfill_if_needed()
+
+        fake_client.fetch_window.assert_called_once()
+
+    def test_incomplete_backfill_is_retried(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "toggl.db")
+        monkeypatch.setattr(main, "_DB_PATH", db_path)
+        monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2015-01-01")
+        fake_client = Mock()
+        fake_client.fetch_window.return_value = ([], False)
+        with patch.object(main, "_get_client", return_value=fake_client):
+            main._backfill_if_needed()
+            main._backfill_if_needed()
+
+        assert fake_client.fetch_window.call_count == 2
+
+    def test_reruns_when_the_start_date_moves_earlier(self, tmp_path, monkeypatch):
+        db_path = str(tmp_path / "toggl.db")
+        monkeypatch.setattr(main, "_DB_PATH", db_path)
+        TogglArchive(db_path).set_meta(main._BACKFILL_FROM_KEY, "2015-01-01")
+        monkeypatch.setattr(main, "_TOGGL_HISTORY_START_DATE", "2010-01-01")
+        fake_client = Mock()
+        fake_client.fetch_window.return_value = ([], True)
+        with patch.object(main, "_get_client", return_value=fake_client):
+            main._backfill_if_needed()
+
+        start_date, _ = fake_client.fetch_window.call_args.args
+        assert start_date == "2010-01-01"
 
 
 def _archived(entry_id: int, day: str) -> dict:

@@ -400,6 +400,10 @@ class TogglArchive:
         CREATE INDEX IF NOT EXISTS idx_project ON time_entries (project_id);
         CREATE INDEX IF NOT EXISTS idx_day_project
             ON time_entries (substr(start_iso, 1, 10), project_id);
+        CREATE TABLE IF NOT EXISTS meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS alert_cooldowns (
             alert_type  TEXT    NOT NULL,
             project_id  INTEGER NOT NULL,
@@ -505,6 +509,15 @@ class TogglArchive:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.executemany("DELETE FROM time_entries WHERE id = ?", [(i,) for i in ids])
         return cursor.rowcount
+
+    def get_meta(self, key: str) -> str | None:
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
 
     def set_duration(self, entry_id: int, duration_secs: int) -> None:
         """Overwrite one archived entry's duration (after editing it in Toggl)."""
