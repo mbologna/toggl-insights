@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   python:
-    uses: mbologna/.github/.github/workflows/python-ci.yml@4ba7c7930fdf79124c856073037b1f20a41ea98e # main
+    uses: mbologna/.github/.github/workflows/python-ci.yml@4ab7563caf5d7d861f5275163417627e38eecc0e # main
     with:
       python_version: "3.15"
       use_uv: true
@@ -33,7 +33,7 @@ jobs:
 
   docker:
     needs: python
-    uses: mbologna/.github/.github/workflows/docker-ci.yml@4ba7c7930fdf79124c856073037b1f20a41ea98e # main
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@4ab7563caf5d7d861f5275163417627e38eecc0e # main
     with:
       image_name: toggl-insights
       # Only release tags publish the image (auto-release dispatches
@@ -41,7 +41,6 @@ jobs:
       publish: release
       push_to_dockerhub: false
       enable_cosign: true
-      enable_release_drafter: true
     secrets: inherit
 
   auto-release:
@@ -59,7 +58,7 @@ jobs:
     permissions:
       contents: write
       actions: write
-    uses: mbologna/.github/.github/workflows/auto-release.yml@4ba7c7930fdf79124c856073037b1f20a41ea98e # main
+    uses: mbologna/.github/.github/workflows/auto-release.yml@4ab7563caf5d7d861f5275163417627e38eecc0e # main
     with:
       strategy: conventional
       image: ghcr.io/mbologna/toggl-insights
@@ -67,7 +66,7 @@ jobs:
 
   cache-cleanup:
     if: github.event_name == 'schedule'
-    uses: mbologna/.github/.github/workflows/cache-cleanup.yml@4ba7c7930fdf79124c856073037b1f20a41ea98e # main
+    uses: mbologna/.github/.github/workflows/cache-cleanup.yml@4ab7563caf5d7d861f5275163417627e38eecc0e # main
     with:
       max_age_days: 7
     permissions:
