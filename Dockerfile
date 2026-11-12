@@ -15,6 +15,12 @@ RUN uv export --quiet --locked --no-dev --no-emit-project --no-header -o /tmp/re
     && uv pip install --system --no-cache --require-hashes -r /tmp/requirements.txt \
     && rm /tmp/requirements.txt
 
+# pip only installs the image's dependencies at build time. Removing it
+# (with the packages it vendors) and ensurepip's bundled pip wheel keeps
+# their CVEs out of the image: nothing runs pip at run time.
+RUN /usr/local/bin/python3 -m pip uninstall -y --root-user-action=ignore pip \
+    && rm -rf /usr/local/lib/python3*/ensurepip
+
 # Copy application code
 COPY src/ ./src/
 
