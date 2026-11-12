@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   python:
-    uses: mbologna/.github/.github/workflows/python-ci.yml@5797c3f0e987ee045b00d0a1640dfcdce3c45ce0 # main
+    uses: mbologna/.github/.github/workflows/python-ci.yml@ee5bcf8cd73154eaccd48e386919f73d2dd832e2 # main
     with:
       python_version: "3.15"
       enable_codecov: false
@@ -38,7 +38,7 @@ jobs:
       attestations: write
       security-events: write
       actions: write
-    uses: mbologna/.github/.github/workflows/docker-ci.yml@5797c3f0e987ee045b00d0a1640dfcdce3c45ce0 # main
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@ee5bcf8cd73154eaccd48e386919f73d2dd832e2 # main
     with:
       image_name: toggl-insights
       # Only release tags publish the image (auto-release dispatches
