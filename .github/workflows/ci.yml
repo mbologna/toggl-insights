@@ -33,7 +33,7 @@ jobs:
 
   docker:
     needs: python
-    uses: mbologna/.github/.github/workflows/docker-ci.yml@4ab7563caf5d7d861f5275163417627e38eecc0e # main
+    uses: mbologna/.github/.github/workflows/docker-ci.yml@4d292bc743ee4279886fedac0d85b0462dae9481 # test
     with:
       image_name: toggl-insights
       # Only release tags publish the image (auto-release dispatches
