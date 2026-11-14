@@ -13,3 +13,5 @@ package_name: toggl_insights
 project_name: toggl-insights
 sample_code: false
 smoke_cmd: python -c 'import toggl_insights.main, toggl_insights.alerts, toggl_insights.cleanup'
+
+#copier updated
