@@ -1,38 +1,26 @@
-# Pre-commit hooks configuration
-# Install: pre-commit install
-# Run manually: pre-commit run --all-files
+# Local checks before each commit (CI runs ruff and the tests again).
+# Install once: pre-commit install
 
 repos:
-  # Ruff - Fast Python linter and formatter
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.4
     hooks:
-      # Run the linter
       - id: ruff-check
         types_or: [python, pyi]
-      # Run the formatter
       - id: ruff-format
         types_or: [python, pyi]
 
-  # Basic file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
-      # Prevent committing large files
       - id: check-added-large-files
         args: ['--maxkb=1000']
-      # Check for merge conflict markers
       - id: check-merge-conflict
-      # Check YAML syntax
       - id: check-yaml
-        args: ['--unsafe']  # Allow custom YAML tags in k8s files
-      # Check TOML syntax
+        args: ['--unsafe']  # custom YAML tags (GitLab !reference, Kubernetes)
       - id: check-toml
-      # Ensure files end with newline
       - id: end-of-file-fixer
-      # Remove trailing whitespace
       - id: trailing-whitespace
-      # Check for files that would conflict on case-insensitive filesystems
       - id: check-case-conflict
       - id: detect-private-key
 
@@ -40,15 +28,13 @@ repos:
     rev: v2.4.1
     hooks:
       - id: mypy
-        # mypy parses with the interpreter it runs on; the code uses Python
-        # 3.14 syntax (PEP 758: except A, B without parentheses), so an older
-        # default python reports a syntax error.
-        language_version: python3.14
-        args: [--explicit-package-bases, --ignore-missing-imports]
+        # mypy parses with the interpreter it runs on: the image's Python,
+        # so newer syntax isn't a parse error.
+        language_version: python3.15
+        args: [--ignore-missing-imports]
         additional_dependencies:
           - types-requests
 
-  # Security checks
   - repo: https://github.com/PyCQA/bandit
     rev: 1.9.4
     hooks:
@@ -57,26 +43,24 @@ repos:
         additional_dependencies: ['bandit[toml]']
         exclude: ^tests/
 
-  # Check for common security issues
   - repo: https://github.com/python-jsonschema/check-jsonschema
     rev: 0.39.0
     hooks:
       - id: check-github-workflows
-      - id: check-dependabot
+      - id: check-renovate
+        additional_dependencies: ['json5']
 
   - repo: https://github.com/hadolint/hadolint
     rev: v2.15.1
     hooks:
       - id: hadolint
 
+  # The squash-merge subject is the release note: keep commits Conventional.
   - repo: https://github.com/compilerla/conventional-pre-commit
     rev: v4.5.0
     hooks:
       - id: conventional-pre-commit
         stages: [commit-msg]
 
-
-# Global settings
 default_install_hook_types: [pre-commit, commit-msg]
 default_stages: [pre-commit]
-fail_fast: false

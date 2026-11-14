@@ -23,7 +23,7 @@ entrypoints sends weekly/monthly reports and a lapsed-habit nudge to [Apprise](h
                  └──────────────┬──────────────┘
                                 │
                  ┌──────────────▼──────────────┐
-                 │   TogglReportsClient         │  src/toggl.py
+                 │   TogglReportsClient         │  toggl.py
                  │   (rate-limit aware, chunks  │
                  │    ranges into ≤366d pages)  │
                  └──────────────┬──────────────┘
@@ -34,9 +34,9 @@ entrypoints sends weekly/monthly reports and a lapsed-habit nudge to [Apprise](h
                  └──┬───────────────────────┬───┘
                     │                       │
    ┌────────────────▼───────────┐   ┌───────▼────────────────────┐
-   │  FastAPI app (src/main.py) │   │  Alert entrypoints          │
-   │  - background sync thread  │   │  (src/alerts.py, run via    │
-   │    (hourly 90-day sync +   │   │   python -m src.alerts)     │
+   │  FastAPI app (main.py)     │   │  Alert entrypoints          │
+   │  - background sync thread  │   │  (alerts.py, run via        │
+   │    (hourly 90-day sync +   │   │   toggl-alerts)             │
    │    a daily full-history    │   │  - weekly digest            │
    │    check against Toggl)    │   │  - monthly report           │
    │  - /api/data, /api/heatmap,│   │  - session-gap nudge        │
@@ -49,7 +49,7 @@ entrypoints sends weekly/monthly reports and a lapsed-habit nudge to [Apprise](h
                                               └─────────────────┘
 ```
 
-The dashboard (`src/main.py`) and the alert entrypoints (`src/alerts.py`) are
+The dashboard (`main.py`) and the alert entrypoints (`alerts.py`) are
 independent processes sharing the same SQLite archive (same `toggl-insights-data`
 PVC in k8s), but only the dashboard's background thread ever calls the Reports
 API — hourly, plus the daily full-history check (below). The alert
@@ -98,7 +98,7 @@ See `.env.template` for a copy-pasteable starting point.
 ```bash
 uv sync
 cp .env.template .env   # fill in TOGGL_API_TOKEN / TOGGL_WORKSPACE_ID
-uv run uvicorn src.main:app --reload
+uv run uvicorn toggl_insights.main:app --reload
 ```
 
 Dashboard: http://localhost:8000. The first boot fetches the whole history
@@ -115,9 +115,9 @@ Run an alert entrypoint manually — these read whatever's already in
 least once) against the same DB file first, or the archive will just be empty:
 
 ```bash
-uv run python -m src.alerts --digest       # weekly digest (last completed ISO week)
-uv run python -m src.alerts --monthly      # monthly report (last completed month)
-uv run python -m src.alerts --session-gap  # lapsed-routine nudge
+uv run toggl-alerts --digest       # weekly digest (last completed ISO week)
+uv run toggl-alerts --monthly      # monthly report (last completed month)
+uv run toggl-alerts --session-gap  # lapsed-routine nudge
 ```
 
 Set `ALERT_DRY_RUN=true` to log what would be sent without actually posting to
@@ -199,7 +199,7 @@ on 2026-10-25, explicit ordering or not). A range that doesn't fit one
 
 ## Cleanup
 
-`python -m src.cleanup` finds suspicious entries of recurring activities.
+`toggl-cleanup` finds suspicious entries of recurring activities.
 Each rule is relative to the activity's own median entry over the last 12
 weeks:
 
@@ -216,9 +216,9 @@ weeks:
   the real stop time is unknown.
 
 ```bash
-python -m src.cleanup                        # report only (the default)
-python -m src.cleanup --rule stub --apply    # change Toggl and the archive
-python -m src.cleanup --restore 20261024T210000Z
+toggl-cleanup                        # report only (the default)
+toggl-cleanup --rule stub --apply    # change Toggl and the archive
+toggl-cleanup --restore 20261024T210000Z
 ```
 
 `--since` (default: 90 days ago), `--description` (matched like the API) and `--limit`

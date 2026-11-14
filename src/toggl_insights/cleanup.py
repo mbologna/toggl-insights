@@ -1,10 +1,10 @@
 """Find, and optionally fix, spurious entries of recurring activities in Toggl.
 
 Usage:
-    python -m src.cleanup                        # report only: list what would change
-    python -m src.cleanup --apply [--limit N]    # change it in Toggl and the archive
-    python -m src.cleanup --restore RUN_ID       # undo an --apply run
-    python -m src.cleanup --scheduled            # weekly CronJob: apply within a budget, report via Apprise
+    toggl-cleanup                        # report only: list what would change
+    toggl-cleanup --apply [--limit N]    # change it in Toggl and the archive
+    toggl-cleanup --restore RUN_ID       # undo an --apply run
+    toggl-cleanup --scheduled            # weekly CronJob: apply within a budget, report via Apprise
     options: --since YYYY-MM-DD (default: 90 days ago), --description WORDS,
              --rule stub|daily|long (only that rule)
 
@@ -37,18 +37,14 @@ import argparse
 import json
 import logging
 import os
-import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 
 from dotenv import load_dotenv
 
-# Allow running as `python src/cleanup.py` from project root
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from src.alerts import _send_alert  # noqa: E402
-from src.toggl import (  # noqa: E402
+from toggl_insights.alerts import _send_alert
+from toggl_insights.toggl import (
     REPORT_ROUTINES,
     TogglArchive,
     TogglQuotaExhausted,
@@ -444,7 +440,7 @@ def format_message(
     """Body lines of the weekly message (empty: nothing worth sending)."""
     lines: list[str] = []
     if applied:
-        lines.append(f"Fixed {len(applied)} · undo: python -m src.cleanup --restore {run_id}")
+        lines.append(f"Fixed {len(applied)} · undo: toggl-cleanup --restore {run_id}")
         for c in applied:
             what = (
                 f"merged {len(c.entries)} entries → {_secs(c.merged_secs)}"
@@ -514,7 +510,9 @@ def run_scheduled(archive: TogglArchive, writer: TogglWriteClient, log: BackupLo
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        prog="toggl-cleanup", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--since", type=date.fromisoformat, help="first day to scan (default: 90 days ago)")
     parser.add_argument("--description", help="only matching descriptions (case, emoji and punctuation ignored)")
     parser.add_argument("--apply", action="store_true", help="change Toggl and the archive (default: report only)")
@@ -566,7 +564,7 @@ def main(argv: list[str] | None = None) -> None:
     except Exception:
         logger.exception("Stopped at the first failed change; undo the partial run with --restore %s", run_id)
         raise SystemExit(1) from None
-    print(f"Applied {applied}. Undo with: python -m src.cleanup --restore {run_id}")
+    print(f"Applied {applied}. Undo with: toggl-cleanup --restore {run_id}")
 
 
 if __name__ == "__main__":

@@ -9,10 +9,8 @@ starts the app. Used for the README screenshot.
 
 import os
 import random
-import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 PROJECTS = [
     {"id": 1, "name": "Learning", "color": "#06aaf5", "active": True},
@@ -36,7 +34,7 @@ ONE_OFFS = [(3, "Release prep"), (4, "Magazine"), (5, "Pruning"), (1, "Workshop"
 
 
 def seed(db_path: str, days: int = 3 * 365) -> str:
-    from src.toggl import TogglArchive
+    from toggl_insights.toggl import TogglArchive
 
     rng = random.Random(42)  # nosec B311: fake data, not security
     now = datetime.now(UTC)
@@ -86,7 +84,6 @@ def _entry(entry_id: int, project_id: int, description: str, start: datetime, se
 
 
 def main() -> None:
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     db_path = os.path.join(tempfile.mkdtemp(prefix="toggl-demo-"), "toggl.db")
     os.environ.update(
         TOGGL_API_TOKEN="demo",  # nosec B106: placeholder, the client is stubbed
@@ -98,14 +95,14 @@ def main() -> None:
     )
     os.environ["TOGGL_HISTORY_START_DATE"] = seed(db_path)
 
-    from src.toggl import TogglReportsClient
+    from toggl_insights.toggl import TogglReportsClient
 
     TogglReportsClient.get_projects = lambda self: PROJECTS  # type: ignore[method-assign]
     TogglReportsClient.fetch_raw = lambda self, start_date, end_date: []  # type: ignore[method-assign]
 
     import uvicorn
 
-    from src.main import app
+    from toggl_insights.main import app
 
     uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("PORT", "8000")))
 

@@ -1,0 +1,15 @@
+# Copier's record of this project's template answers. Don't edit by hand:
+# `copier update --trust` (or Renovate's copier manager) reads it to apply
+# template changes.
+_commit: v1.1.0
+_src_path: https://github.com/mbologna/python-app-template.git
+author: Michele Bologna
+base_variant: slim
+coverage_fail_under: 90
+description: Toggl time tracking dashboard and trend alerts
+forge: github
+notifications: true
+package_name: toggl_insights
+project_name: toggl-insights
+sample_code: false
+smoke_cmd: python -c 'import toggl_insights.main, toggl_insights.alerts, toggl_insights.cleanup'

@@ -1,8 +1,17 @@
 [project]
 name = "toggl-insights"
-version = "0.1.0"
+# A placeholder, never bumped: a release is the git tag vX.Y.Z that
+# auto-release creates, and the image built from that tag carries the
+# version in its org.opencontainers.image.version label. Nothing reads this
+# field at run time.
+version = "0.0.0"
 description = "Toggl time tracking dashboard and trend alerts"
-requires-python = ">=3.14"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Michele Bologna" }]
+# The Python the Dockerfile's base image ships; Renovate moves the image,
+# a person moves this floor with the next minor.
+requires-python = ">=3.15"
 dependencies = [
     "apprise-notify @ git+https://github.com/mbologna/apprise-notify-py@v1.2.0",
     "fastapi>=0.115.0",
@@ -12,30 +21,40 @@ dependencies = [
     "jinja2>=3.1.0",
 ]
 
+[project.scripts]
+# The dashboard (the image's entry point), the scheduled alerts and the
+# entry cleanup.
+toggl-insights = "toggl_insights.main:serve"
+toggl-alerts = "toggl_insights.alerts:main"
+toggl-cleanup = "toggl_insights.cleanup:main"
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.1",
+    "pytest>=9.0.3",
+    "pytest-cov>=7.1.0",
+    "pytest-mock>=3.12.0",
+    "httpx2>=0.1.0",
+    "ruff>=0.17.0",
+]
+
 [tool.uv]
-package = false
 required-version = ">=0.12.12"
-# Resolve only releases at least 7 days old (supply-chain cooldown). For an
-# urgent fix, temporarily add exclude-newer-package = { <name> = false } and
-# run `uv lock --upgrade-package <name>`.
+# Resolve only releases at least 7 days old, so a compromised release has
+# time to be caught and yanked before it lands in uv.lock. For an urgent
+# fix, add `<name> = false` to exclude-newer-package and run `uv lock`.
 exclude-newer = "7 days"
 # apprise-notify is a git dependency pinned by tag, which the cutoff does not
 # cover anyway; the entry keeps it exempt if it moves to a registry.
 exclude-newer-package = { apprise-notify = false }
 
-[dependency-groups]
-dev = [
-    "pytest>=9.0.3",
-    "pytest-cov>=7.1.0",
-    "pytest-mock>=3.12.0",
-    "ruff>=0.8.0",
-    "pre-commit>=4.5.1",
-    "httpx2>=0.1.0",
-]
-
 [tool.ruff]
 line-length = 120
-target-version = "py314"
+target-version = "py315"
 
 [tool.ruff.lint]
 select = [
@@ -48,7 +67,7 @@ select = [
     "UP",  # pyupgrade
 ]
 ignore = [
-    "E501",  # line too long (handled by formatter)
+    "E501",  # line too long (the formatter handles it)
 ]
 
 [tool.ruff.format]
@@ -57,8 +76,18 @@ indent-style = "space"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
 addopts = "-v --strict-markers"
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.coverage.run]
+source = ["toggl_insights"]
+# `python -m toggl_insights` only calls main().
+omit = ["*/__main__.py"]
+
+[tool.coverage.report]
+# CI fails below this total (python-ci and ci-templates' python-test read
+# it). Raise it with the tests; don't lower it to merge.
+fail_under = 90
+show_missing = true

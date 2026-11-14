@@ -7,12 +7,13 @@ import subprocess
 import sys
 import urllib.error
 from datetime import date, timedelta
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import apprise_notify
 import pytest
 
-from src.alerts import (
+from toggl_insights.alerts import (
     _alert_on_empty_projects,
     _change,
     _get_client_and_archive,
@@ -30,7 +31,7 @@ from src.alerts import (
     run_session_gap_alerts,
     run_weekly_digest,
 )
-from src.toggl import TogglArchive, TogglReportsClient
+from toggl_insights.toggl import TogglArchive, TogglReportsClient
 
 
 def _entry(start: str, duration_s: int) -> dict:
@@ -129,7 +130,7 @@ class TestGetClientAndArchive:
         monkeypatch.setenv("TOGGL_WORKSPACE_ID", "123456")
         monkeypatch.setenv("TOGGL_DB_PATH", str(tmp_path / "toggl.db"))
 
-        with patch("src.toggl.requests.post") as mock_post:
+        with patch("toggl_insights.toggl.requests.post") as mock_post:
             client, archive = _get_client_and_archive()
 
         assert isinstance(client, TogglReportsClient)
@@ -163,7 +164,7 @@ class TestAlertOnEmptyProjects:
         archive = TogglArchive(str(tmp_path / "toggl.db"))
         archive.mark_alerted("no_projects", [0])
 
-        with patch("src.alerts._send_alert") as mock_send:
+        with patch("toggl_insights.alerts._send_alert") as mock_send:
             _alert_on_empty_projects(archive, "http://apprise/notify")
 
         mock_send.assert_not_called()
@@ -363,18 +364,18 @@ class TestEntryLocalDate:
     def _berlin(self, monkeypatch):
         from zoneinfo import ZoneInfo
 
-        monkeypatch.setattr("src.alerts._ALERT_TZ", ZoneInfo("Europe/Berlin"))
+        monkeypatch.setattr("toggl_insights.alerts._ALERT_TZ", ZoneInfo("Europe/Berlin"))
 
     def test_utc_z_suffix(self):
         # 23:30 UTC on June 22 = 01:30 June 23 in Europe/Berlin (CEST UTC+2)
-        from src.alerts import _entry_local_date
+        from toggl_insights.alerts import _entry_local_date
 
         d = _entry_local_date("2026-06-22T23:30:00Z")
         assert d.isoformat() == "2026-06-23"
 
     def test_early_morning_utc(self):
         # 08:00 UTC = 10:00 Berlin — same date
-        from src.alerts import _entry_local_date
+        from toggl_insights.alerts import _entry_local_date
 
         d = _entry_local_date("2026-06-22T08:00:00Z")
         assert d.isoformat() == "2026-06-22"
@@ -434,10 +435,10 @@ class TestRunWeeklyDigest:
             return True
 
         with (
-            patch("src.alerts.TogglReportsClient", return_value=mock_client),
-            patch("src.alerts.TogglArchive", return_value=mock_archive),
-            patch("src.alerts.date") as mock_date,
-            patch("src.alerts._send_alert", side_effect=fake_send),
+            patch("toggl_insights.alerts.TogglReportsClient", return_value=mock_client),
+            patch("toggl_insights.alerts.TogglArchive", return_value=mock_archive),
+            patch("toggl_insights.alerts.date") as mock_date,
+            patch("toggl_insights.alerts._send_alert", side_effect=fake_send),
         ):
             mock_date.today.return_value = self._TODAY
             mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
@@ -458,10 +459,10 @@ class TestRunWeeklyDigest:
         sent_calls: list = []
 
         with (
-            patch("src.alerts.TogglReportsClient", return_value=mock_client),
-            patch("src.alerts.TogglArchive", return_value=mock_archive),
-            patch("src.alerts.date") as mock_date,
-            patch("src.alerts._send_alert", side_effect=lambda *a, **kw: sent_calls.append(a)),
+            patch("toggl_insights.alerts.TogglReportsClient", return_value=mock_client),
+            patch("toggl_insights.alerts.TogglArchive", return_value=mock_archive),
+            patch("toggl_insights.alerts.date") as mock_date,
+            patch("toggl_insights.alerts._send_alert", side_effect=lambda *a, **kw: sent_calls.append(a)),
         ):
             mock_date.today.return_value = self._TODAY
             mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
@@ -477,10 +478,10 @@ class TestRunWeeklyDigest:
         mock_client, mock_archive = self._make_mocks(projects=[], entries_by_id={})
 
         with (
-            patch("src.alerts.TogglReportsClient", return_value=mock_client),
-            patch("src.alerts.TogglArchive", return_value=mock_archive),
-            patch("src.alerts.date") as mock_date,
-            patch("src.alerts._alert_on_empty_projects") as mock_meta_alert,
+            patch("toggl_insights.alerts.TogglReportsClient", return_value=mock_client),
+            patch("toggl_insights.alerts.TogglArchive", return_value=mock_archive),
+            patch("toggl_insights.alerts.date") as mock_date,
+            patch("toggl_insights.alerts._alert_on_empty_projects") as mock_meta_alert,
         ):
             mock_date.today.return_value = self._TODAY
             mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
@@ -509,10 +510,10 @@ class TestRunWeeklyDigest:
             return True
 
         with (
-            patch("src.alerts.TogglReportsClient", return_value=mock_client),
-            patch("src.alerts.TogglArchive", return_value=mock_archive),
-            patch("src.alerts.date") as mock_date,
-            patch("src.alerts._send_alert", side_effect=fake_send),
+            patch("toggl_insights.alerts.TogglReportsClient", return_value=mock_client),
+            patch("toggl_insights.alerts.TogglArchive", return_value=mock_archive),
+            patch("toggl_insights.alerts.date") as mock_date,
+            patch("toggl_insights.alerts._send_alert", side_effect=fake_send),
         ):
             mock_date.today.return_value = self._TODAY
             mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
@@ -542,10 +543,10 @@ class TestRunWeeklyDigest:
             return True
 
         with (
-            patch("src.alerts.TogglReportsClient", return_value=mock_client),
-            patch("src.alerts.TogglArchive", return_value=mock_archive),
-            patch("src.alerts.date") as mock_date,
-            patch("src.alerts._send_alert", side_effect=fake_send),
+            patch("toggl_insights.alerts.TogglReportsClient", return_value=mock_client),
+            patch("toggl_insights.alerts.TogglArchive", return_value=mock_archive),
+            patch("toggl_insights.alerts.date") as mock_date,
+            patch("toggl_insights.alerts._send_alert", side_effect=fake_send),
         ):
             mock_date.today.return_value = self._TODAY
             mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
@@ -594,10 +595,10 @@ def _run_entrypoint(
 
     sent: list[tuple[str, list[str]]] = []
     with (
-        patch("src.alerts.TogglReportsClient", return_value=mock_client),
-        patch("src.alerts.TogglArchive", return_value=mock_archive),
-        patch("src.alerts.date") as mock_date,
-        patch("src.alerts._send_alert", side_effect=_recorder(sent)),
+        patch("toggl_insights.alerts.TogglReportsClient", return_value=mock_client),
+        patch("toggl_insights.alerts.TogglArchive", return_value=mock_archive),
+        patch("toggl_insights.alerts.date") as mock_date,
+        patch("toggl_insights.alerts._send_alert", side_effect=_recorder(sent)),
     ):
         mock_date.today.return_value = today
         mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
@@ -743,7 +744,7 @@ class TestRunMonthlyReport:
         assert sent == []
 
     def test_alerts_when_no_projects_found(self, monkeypatch):
-        with patch("src.alerts._alert_on_empty_projects") as mock_meta_alert:
+        with patch("toggl_insights.alerts._alert_on_empty_projects") as mock_meta_alert:
             _run_entrypoint(monkeypatch, run_monthly_report, self._TODAY, projects=[])
         mock_meta_alert.assert_called_once()
 
@@ -818,31 +819,45 @@ class TestEntrypointDispatch:
     @pytest.mark.parametrize("argv", [[], ["--midweek"], ["--digest", "--monthly"]])
     def test_rejects_missing_or_unknown_flags(self, argv):
         result = subprocess.run(
-            [sys.executable, "-m", "src.alerts", *argv],
+            [sys.executable, "-m", "toggl_insights.alerts", *argv],
             capture_output=True,
             text=True,
             env={**os.environ, "APPRISE_URL": ""},
         )
         assert result.returncode != 0
-        assert "usage: python -m src.alerts" in result.stderr
+        assert "usage: toggl-alerts" in result.stderr
+
+    def test_compat_module_path_still_dispatches(self):
+        # The image keeps `python -m src.alerts` (older deployments) working
+        # through compat/, run from its working directory.
+        compat = Path(__file__).resolve().parent.parent / "compat"
+        result = subprocess.run(
+            [sys.executable, "-m", "src.alerts", "--midweek"],
+            capture_output=True,
+            text=True,
+            cwd=compat,
+            env={**os.environ, "APPRISE_URL": ""},
+        )
+        assert result.returncode != 0
+        assert "usage: toggl-alerts" in result.stderr
 
 
 class TestLoadPerProjectThresholds:
     def test_valid_json(self, monkeypatch):
-        from src.alerts import _load_per_project_thresholds
+        from toggl_insights.alerts import _load_per_project_thresholds
 
         monkeypatch.setenv("TREND_ALERT_THRESHOLDS", '{"123": 0.15, "456": 0.3}')
         result = _load_per_project_thresholds()
         assert result == {"123": 0.15, "456": 0.3}
 
     def test_empty_env(self, monkeypatch):
-        from src.alerts import _load_per_project_thresholds
+        from toggl_insights.alerts import _load_per_project_thresholds
 
         monkeypatch.delenv("TREND_ALERT_THRESHOLDS", raising=False)
         assert _load_per_project_thresholds() == {}
 
     def test_invalid_json(self, monkeypatch):
-        from src.alerts import _load_per_project_thresholds
+        from toggl_insights.alerts import _load_per_project_thresholds
 
         monkeypatch.setenv("TREND_ALERT_THRESHOLDS", "not-json")
         assert _load_per_project_thresholds() == {}

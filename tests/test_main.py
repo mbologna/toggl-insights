@@ -1,4 +1,4 @@
-"""Unit tests for src.main's archive sync, daily history check and HTTP endpoints."""
+"""Unit tests for toggl_insights.main's archive sync, daily history check and HTTP endpoints."""
 
 import sqlite3
 from datetime import date, datetime, timedelta
@@ -8,8 +8,8 @@ from zoneinfo import ZoneInfo
 import pytest
 from fastapi.testclient import TestClient
 
-import src.main as main
-from src.toggl import TogglArchive, TogglReportsClient
+import toggl_insights.main as main
+from toggl_insights.toggl import TogglArchive, TogglReportsClient
 
 ROME = ZoneInfo("Europe/Rome")
 
