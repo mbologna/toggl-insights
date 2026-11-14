@@ -14,10 +14,8 @@ import sys
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import requests
+from apprise_notify import notify
 from dotenv import load_dotenv
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 # Allow running as `python src/alerts.py` from project root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -132,38 +130,10 @@ def _load_per_project_thresholds() -> dict[str, float]:
     return {}
 
 
-# Apprise sits behind a cross-cluster Tailscale path that goes cold between
-# infrequent alert runs; the first (cold) WireGuard connect can take several
-# seconds. A tight connect timeout with no retry silently dropped alerts, so
-# allow a generous connect timeout and retry — the retry hits a now-warm path.
-_APPRISE_CONNECT_TIMEOUT = float(os.environ.get("APPRISE_CONNECT_TIMEOUT", "15"))
-_APPRISE_READ_TIMEOUT = float(os.environ.get("APPRISE_READ_TIMEOUT", "15"))
-_APPRISE_RETRIES = int(os.environ.get("APPRISE_RETRIES", "4"))
-
-
-def _build_apprise_session() -> requests.Session:
-    """Session that retries the Apprise POST on connection errors and 5xx.
-
-    urllib3's Retry does not retry POST by default (not idempotent); we opt in
-    explicitly because the Apprise notify call is safe to repeat. backoff_factor
-    1.5 → waits ~0s, 1.5s, 3s, 6s between attempts, giving the cold tailnet path
-    time to come up.
-    """
-    retry = Retry(
-        total=_APPRISE_RETRIES,
-        connect=_APPRISE_RETRIES,
-        read=2,
-        status=2,
-        backoff_factor=1.5,
-        status_forcelist=(502, 503, 504),
-        allowed_methods=frozenset({"POST"}),
-        raise_on_status=False,
-    )
-    session = requests.Session()
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    return session
+# Seconds the Apprise POST may wait to connect and for each read. Generous
+# because the path to a second Apprise server may cross clusters over a
+# Tailscale link that goes cold between infrequent alert runs.
+_APPRISE_TIMEOUT = float(os.environ.get("APPRISE_TIMEOUT", "15"))
 
 
 def _get_client_and_archive() -> tuple[TogglReportsClient, TogglArchive]:
@@ -196,20 +166,13 @@ def _send_alert(apprise_url: str, title: str, lines: list[str]) -> bool:
     if _is_dry_run():
         logger.info("DRY RUN — would send '%s':\n%s", title, "\n".join(lines))
         return True  # treat as success so cooldowns are still updated
-    body = "\n".join(lines)
-    try:
-        with _build_apprise_session() as session:
-            response = session.post(
-                apprise_url,
-                json={"title": title, "body": body},
-                timeout=(_APPRISE_CONNECT_TIMEOUT, _APPRISE_READ_TIMEOUT),
-            )
-        response.raise_for_status()
+    # notify tries each URL in APPRISE_URL in order (one retry on a network
+    # error or HTTP 5xx) and never raises; it logs failures to stderr.
+    if notify(apprise_url, title, "\n".join(lines), timeout=_APPRISE_TIMEOUT):
         logger.info("Alert sent successfully.")
         return True
-    except requests.exceptions.RequestException as exc:
-        logger.error("Failed to send Apprise alert: %s", exc)
-        return False
+    logger.error("Failed to send Apprise alert %r", title)
+    return False
 
 
 def _alert_on_empty_projects(archive: TogglArchive, apprise_url: str) -> None:
