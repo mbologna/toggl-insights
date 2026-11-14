@@ -50,7 +50,7 @@ jobs:
       # The image must start before anything is tagged: run without network
       # or configuration, this exits 0 only when the code and its
       # dependencies import.
-      smoke_cmd: 'python -c "import toggl_insights.main, toggl_insights.alerts, toggl_insights.cleanup"'
+      smoke_cmd: 'python -c ''import toggl_insights.main, toggl_insights.alerts, toggl_insights.cleanup'''
       # auto-release runs inside docker-ci: Monday's schedule releases with
       # this strategy (and a maintenance release for dependency updates), a
       # push to main only a CVE fix.
