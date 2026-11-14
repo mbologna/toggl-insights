@@ -1,14 +1,16 @@
 """Unit tests for alerts.py pure-function helpers."""
 
+import io
 import json
 import os
 import subprocess
 import sys
+import urllib.error
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
+import apprise_notify
 import pytest
-import requests
 
 from src.alerts import (
     _alert_on_empty_projects,
@@ -50,39 +52,63 @@ def _recorder(sent: list[tuple[str, list[str]]]):
 # ---------------------------------------------------------------------------
 
 
+class _AppriseServer:
+    """Stands in for urllib's urlopen inside apprise_notify: records each URL
+    and payload, and refuses the connection for the URLs in `down`."""
+
+    class _Response(io.BytesIO):
+        status = 200
+
+    def __init__(self, down=()):
+        self.down = set(down)
+        self.calls: list[tuple[str, dict]] = []
+
+    def __call__(self, req, timeout):
+        self.calls.append((req.full_url, json.loads(req.data)))
+        self.timeout = timeout
+        if req.full_url in self.down:
+            raise urllib.error.URLError("connection refused")
+        return self._Response(b"")
+
+
+@pytest.fixture
+def apprise_server(monkeypatch):
+    """Patch apprise_notify's network call; tests set .down to fail URLs."""
+    server = _AppriseServer()
+    monkeypatch.setattr(apprise_notify, "RETRY_DELAY", 0)
+    monkeypatch.setattr(apprise_notify.urllib.request, "urlopen", server)
+    return server
+
+
 class TestSendAlert:
     _URL = "http://apprise.local/notify/x"
 
-    def test_dry_run_short_circuits(self, monkeypatch):
+    def test_dry_run_short_circuits(self, monkeypatch, apprise_server):
         monkeypatch.setenv("ALERT_DRY_RUN", "true")
-        with patch("src.alerts.requests.Session.post") as mock_post:
-            assert _send_alert(self._URL, "t", ["a", "b"]) is True
-            mock_post.assert_not_called()
+        assert _send_alert(self._URL, "t", ["a", "b"]) is True
+        assert apprise_server.calls == []
 
-    def test_success_uses_generous_connect_timeout(self, monkeypatch):
+    def test_success_uses_generous_timeout(self, monkeypatch, apprise_server):
         monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
-        with patch("src.alerts.requests.Session.post") as mock_post:
-            mock_post.return_value = MagicMock(raise_for_status=lambda: None)
-            assert _send_alert(self._URL, "t", ["line"]) is True
-            _, kwargs = mock_post.call_args
-            connect_timeout, _read_timeout = kwargs["timeout"]
-            # Must tolerate a cold cross-cluster WireGuard connect (was 3.05s).
-            assert connect_timeout >= 10
+        assert _send_alert(self._URL, "t", ["line", "two"]) is True
+        assert apprise_server.calls == [(self._URL, {"title": "t", "body": "line\ntwo", "type": "info"})]
+        # Must tolerate a cold cross-cluster WireGuard connect (was 3.05s).
+        assert apprise_server.timeout >= 10
 
-    def test_retries_are_configured_for_post(self, monkeypatch):
-        """The session must opt POST into urllib3 retries (off by default)."""
+    def test_connection_error_returns_false(self, monkeypatch, apprise_server):
         monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
-        from src.alerts import _build_apprise_session
+        apprise_server.down = {self._URL}
+        assert _send_alert(self._URL, "t", ["line"]) is False
+        # One retry on a network error, then give up.
+        assert [url for url, _ in apprise_server.calls] == [self._URL, self._URL]
 
-        session = _build_apprise_session()
-        retry = session.get_adapter("http://apprise.local").max_retries
-        assert retry.connect and retry.connect >= 1
-        assert "POST" in retry.allowed_methods
-
-    def test_connection_error_returns_false(self, monkeypatch):
+    def test_url_list_fails_over_in_order(self, monkeypatch, apprise_server):
+        """APPRISE_URL may list several URLs: the first is retried once, then the next delivers."""
         monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
-        with patch("src.alerts.requests.Session.post", side_effect=requests.exceptions.ConnectTimeout("cold")):
-            assert _send_alert(self._URL, "t", ["line"]) is False
+        own, other, third = "http://own/notify/x", "http://other/notify/x", "http://third/notify/x"
+        apprise_server.down = {own}
+        assert _send_alert(f"{own} {other} {third}", "t", ["line"]) is True
+        assert [url for url, _ in apprise_server.calls] == [own, own, other]
 
 
 # ---------------------------------------------------------------------------
@@ -142,16 +168,24 @@ class TestAlertOnEmptyProjects:
 
         mock_send.assert_not_called()
 
-    def test_sends_actual_payload(self, tmp_path, monkeypatch):
+    def test_sends_actual_payload(self, tmp_path, monkeypatch, apprise_server):
         monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
         archive = TogglArchive(str(tmp_path / "toggl.db"))
 
-        with patch("src.alerts.requests.Session.post") as mock_post:
-            mock_post.return_value = MagicMock(raise_for_status=lambda: None)
-            _alert_on_empty_projects(archive, "http://apprise/notify")
+        _alert_on_empty_projects(archive, "http://apprise/notify")
 
-        _, kwargs = mock_post.call_args
-        assert kwargs["json"]["title"] == "Toggl Insights: alerting is down"
+        ((_, payload),) = apprise_server.calls
+        assert payload["title"] == "Toggl Insights: alerting is down"
+        assert archive.is_on_cooldown("no_projects", 0, cooldown_days=5)
+
+    def test_undelivered_alert_leaves_no_cooldown(self, tmp_path, monkeypatch, apprise_server):
+        monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
+        archive = TogglArchive(str(tmp_path / "toggl.db"))
+        apprise_server.down = {"http://apprise/notify"}
+
+        _alert_on_empty_projects(archive, "http://apprise/notify")
+
+        assert not archive.is_on_cooldown("no_projects", 0, cooldown_days=5)
 
 
 # ---------------------------------------------------------------------------

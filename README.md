@@ -71,7 +71,7 @@ Projects are discovered dynamically from Toggl (`GET /me/projects`, cached 24h)
 |---|---|---|---|---|
 | `TOGGL_API_TOKEN` | yes | — | all | Toggl API token (Profile → API Token) |
 | `TOGGL_WORKSPACE_ID` | yes | — | all | Numeric Toggl workspace ID |
-| `APPRISE_URL` | yes (alerts, scheduled cleanup) | — | alerts, cleanup | Apprise notify endpoint |
+| `APPRISE_URL` | yes (alerts, scheduled cleanup) | — | alerts, cleanup | Apprise notify endpoint. Several space-separated URLs are tried in order until one delivers |
 | `TOGGL_DB_PATH` | no | `/data/toggl.db` | all | SQLite archive path |
 | `TOGGL_HISTORY_START_DATE` | no | `2006-01-01` | dashboard | How far back the first full-history check reaches |
 | `TOGGL_DAILY_TARGET_HOURS` | no | — | dashboard | Daily hours target shown on the Overview tab |
@@ -84,7 +84,7 @@ Projects are discovered dynamically from Toggl (`GET /me/projects`, cached 24h)
 | `ALERT_COOLDOWN_DAYS` | no | `5` | alerts | Minimum days between repeats of the lapsed-routine (per activity) and no-projects alerts |
 | `ALERT_DRY_RUN` | no | — | alerts | Log alerts instead of sending them (cooldowns still update) |
 | `ALERT_TIMEZONE` | no | `UTC` | alerts | Timezone used to bucket entries into local days/weeks/months |
-| `APPRISE_CONNECT_TIMEOUT` / `APPRISE_READ_TIMEOUT` / `APPRISE_RETRIES` | no | `15` / `15` / `4` | alerts | Tuned for a cold cross-cluster Tailscale path between infrequent alert runs |
+| `APPRISE_TIMEOUT` | no | `15` | alerts | Seconds each Apprise POST may wait to connect and for each read; generous for a cold cross-cluster Tailscale path between infrequent alert runs |
 | `CLEANUP_STUB_RATIO` / `CLEANUP_STUB_MIN_SECS` | no | `0.10` / `60` | cleanup | An entry shorter than this share of its activity's median, or than this many seconds, is a stub |
 | `CLEANUP_DAILY_RATIO` / `CLEANUP_DAILY_MIN_DAYS` | no | `0.9` / `8` | cleanup | An activity is once a day (same-day entries get merged) when at least this share of its days, over at least this many days in 12 weeks, have a single entry |
 | `CLEANUP_LONG_RATIO` / `CLEANUP_LONG_MIN_SECS` | no | `3` / `7200` | cleanup | An entry longer than both is reported as a forgotten timer |
