@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 
-from src.toggl import (
+from toggl_insights.toggl import (
     REPORT_ROUTINES,
     TogglArchive,
     TogglReportsClient,
@@ -502,3 +502,10 @@ def api_sessions_typical(
 @app.get("/", response_class=FileResponse)
 def dashboard() -> FileResponse:
     return FileResponse(_DASHBOARD_HTML, media_type="text/html")
+
+
+def serve() -> None:
+    """Console script toggl-insights, the image's entry point: the dashboard on port 8080."""
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8080)  # nosec B104: a container port, reached through the Service

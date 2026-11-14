@@ -19,6 +19,8 @@ permissions:
   contents: read
 
 jobs:
+  # ruff, the tests with the coverage gate (fail_under in pyproject.toml)
+  # and pip-audit on the locked runtime dependencies.
   python:
     uses: mbologna/.github/.github/workflows/python-ci.yml@0526d7e5eb36426d31732e97b20e6e275c1ad4f3 # main
     with:
@@ -45,7 +47,12 @@ jobs:
       # their build); pull requests build it without pushing.
       publish: release
       push_to_dockerhub: false
+      # The image must start before anything is tagged: run without network
+      # or configuration, this exits 0 only when the code and its
+      # dependencies import.
+      smoke_cmd: 'python -c "import toggl_insights.main, toggl_insights.alerts, toggl_insights.cleanup"'
       # auto-release runs inside docker-ci: Monday's schedule releases with
-      # this strategy, a push to main only a CVE fix.
+      # this strategy (and a maintenance release for dependency updates), a
+      # push to main only a CVE fix.
       release_strategy: conventional
     secrets: inherit

@@ -265,7 +265,7 @@ class TogglQuotaExhausted(Exception):
 
 
 class TogglWriteClient:
-    """The few Toggl writes src.cleanup needs. Kept apart from TogglReportsClient,
+    """The few Toggl writes cleanup.py needs. Kept apart from TogglReportsClient,
     which the dashboard and alerts use and which never changes anything in Toggl.
 
     Errors raise: a cleanup run must stop at the first failed write, not carry on

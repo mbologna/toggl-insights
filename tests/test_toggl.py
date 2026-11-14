@@ -1,4 +1,4 @@
-"""Unit tests for src.toggl's Reports API fetch, pagination, and retry/backoff behavior."""
+"""Unit tests for toggl_insights.toggl's Reports API fetch, pagination, and retry/backoff behavior."""
 
 import sqlite3
 from datetime import date, timedelta
@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from src.toggl import (
+from toggl_insights.toggl import (
     RATE_LIMIT_MAX_RETRIES,
     RATE_LIMIT_RETRY_BUFFER_SECONDS,
     RATE_LIMIT_RETRY_DELAY_SECONDS,

@@ -1,9 +1,9 @@
 """Scheduled Apprise notifications: periodic aggregate reports plus one nudge.
 
 Usage:
-    python -m src.alerts --digest       # weekly digest of the last completed ISO week (run Monday morning)
-    python -m src.alerts --monthly      # monthly report of the last completed month (run on the 1st)
-    python -m src.alerts --session-gap  # nudge when a recurring activity has lapsed (run daily)
+    toggl-alerts --digest       # weekly digest of the last completed ISO week (run Monday morning)
+    toggl-alerts --monthly      # monthly report of the last completed month (run on the 1st)
+    toggl-alerts --session-gap  # nudge when a recurring activity has lapsed (run daily)
 """
 
 import calendar
@@ -17,10 +17,7 @@ from zoneinfo import ZoneInfo
 from apprise_notify import notify
 from dotenv import load_dotenv
 
-# Allow running as `python src/alerts.py` from project root
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from src.toggl import (  # noqa: E402
+from toggl_insights.toggl import (
     CURRENT_ROUTINE,
     REPORT_ROUTINES,
     TogglArchive,
@@ -143,7 +140,7 @@ def _get_client_and_archive() -> tuple[TogglReportsClient, TogglArchive]:
     entrypoint below used to independently re-fetch the latest 90-120 days on
     every run, each drawing from the same hourly Reports API quota as all the
     other alert CronJobs *and* the dashboard's own background sync thread
-    (src/main.py's _background_sync_loop), which already keeps this same
+    (main.py's _background_sync_loop), which already keeps this same
     SQLite archive (shared via the toggl-insights-data PVC) fresh at least
     hourly. Reading it as-is here means alerts are never more than ~1h stale
     and no longer burn their own share of the quota at all.
@@ -562,10 +559,14 @@ _ENTRYPOINTS = {
 }
 
 
-if __name__ == "__main__":
+def main() -> None:
     flags = [a for a in sys.argv[1:] if a in _ENTRYPOINTS]
     if len(flags) != 1 or len(sys.argv) != 2:
-        sys.exit(f"usage: python -m src.alerts {{{'|'.join(_ENTRYPOINTS)}}}")
+        sys.exit(f"usage: toggl-alerts {{{'|'.join(_ENTRYPOINTS)}}}")
     if _is_dry_run():
         logger.info("DRY RUN mode enabled — alerts will be logged but not sent")
     _ENTRYPOINTS[flags[0]]()
+
+
+if __name__ == "__main__":
+    main()

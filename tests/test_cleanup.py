@@ -1,4 +1,4 @@
-"""Unit tests for src.cleanup: the spurious-entry rules, apply/restore and the write client."""
+"""Unit tests for toggl_insights.cleanup: the spurious-entry rules, apply/restore and the write client."""
 
 import json
 from datetime import date
@@ -8,8 +8,8 @@ from unittest.mock import Mock, patch
 import pytest
 import requests
 
-import src.cleanup as cleanup
-from src.cleanup import (
+import toggl_insights.cleanup as cleanup
+from toggl_insights.cleanup import (
     DAILY,
     LONG,
     STUB,
@@ -20,7 +20,7 @@ from src.cleanup import (
     find_spurious,
     is_once_a_day,
 )
-from src.toggl import (
+from toggl_insights.toggl import (
     LEAKY_BUCKET_RETRY_SECONDS,
     RATE_LIMIT_RETRY_DELAY_SECONDS,
     TogglArchive,
@@ -359,7 +359,7 @@ class TestRunScheduled:
         archive = TogglArchive(str(tmp_path / "toggl.db"))
         archive.upsert(rows)
         for i, check in enumerate(history_checks):
-            with patch("src.toggl.datetime", wraps=cleanup.datetime) as fake_dt:
+            with patch("toggl_insights.toggl.datetime", wraps=cleanup.datetime) as fake_dt:
                 fake_dt.now.return_value = cleanup.datetime.now(tz=cleanup.UTC) - cleanup.timedelta(hours=i + 1)
                 archive.record_history_check(**check)
         log = BackupLog(str(tmp_path / "backup.jsonl"))
@@ -374,7 +374,7 @@ class TestRunScheduled:
         stubs = [_row(1, "2026-06-23", 20), _row(2, "2026-06-24", 20), _row(3, "2026-06-25", 20)]
         ((title, lines),) = self._run(tmp_path, monkeypatch, stubs, max_writes=2)
         assert title == "Toggl cleanup"
-        assert lines[0].startswith("Fixed 2 · undo: python -m src.cleanup --restore ")
+        assert lines[0].startswith("Fixed 2 · undo: toggl-cleanup --restore ")
         assert lines[1:3] == ["• 23 Jun Yoga: deleted a 20s entry", "• 24 Jun Yoga: deleted a 20s entry"]
         assert lines[-2:] == ["1 left for next week (Toggl quota)", "History vs Toggl: matches"]
         assert self.writer.calls == [("delete", 1), ("delete", 2)]
