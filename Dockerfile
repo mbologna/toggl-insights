@@ -38,5 +38,12 @@ ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HOME=/
 # CVEs out of the image.
 RUN /usr/local/bin/python3 -m pip uninstall -y --root-user-action=ignore pip \
     && rm -rf /usr/local/lib/python3*/ensurepip
+# The distribution's security fixes published since the base image was
+# built: Docker's official images are rebuilt only every week or few.
+# auto-release's fresh rebuild counts the base image's findings because of
+# this line, so a fix ships within a week without a base image update.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
 USER 1000:1000
 ENTRYPOINT ["toggl-insights"]
