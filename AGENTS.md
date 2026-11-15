@@ -10,7 +10,6 @@ src/toggl_insights/alerts.py   # scheduled Apprise reports; console script toggl
 src/toggl_insights/cleanup.py  # spurious-entry cleanup; console script toggl-cleanup
 src/toggl_insights/toggl.py    # Reports API client and the SQLite archive
 src/toggl_insights/templates/  # the dashboard page (package data)
-compat/src/                    # transitional `python -m src.<module>` shims for older deployments; remove when unused
 tests/                         # pytest; keep I/O out of the logic so it tests without mocks
 scripts/demo.py                # the dashboard on generated data, no Toggl account needed
 Dockerfile                     # two stages: uv sync --locked into /opt/venv, then a pip-less runtime

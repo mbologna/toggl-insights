@@ -7,7 +7,6 @@ import subprocess
 import sys
 import urllib.error
 from datetime import date, timedelta
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import apprise_notify
@@ -822,20 +821,6 @@ class TestEntrypointDispatch:
             [sys.executable, "-m", "toggl_insights.alerts", *argv],
             capture_output=True,
             text=True,
-            env={**os.environ, "APPRISE_URL": ""},
-        )
-        assert result.returncode != 0
-        assert "usage: toggl-alerts" in result.stderr
-
-    def test_compat_module_path_still_dispatches(self):
-        # The image keeps `python -m src.alerts` (older deployments) working
-        # through compat/, run from its working directory.
-        compat = Path(__file__).resolve().parent.parent / "compat"
-        result = subprocess.run(
-            [sys.executable, "-m", "src.alerts", "--midweek"],
-            capture_output=True,
-            text=True,
-            cwd=compat,
             env={**os.environ, "APPRISE_URL": ""},
         )
         assert result.returncode != 0

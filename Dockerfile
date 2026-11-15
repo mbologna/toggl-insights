@@ -38,11 +38,5 @@ ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HOME=/
 # CVEs out of the image.
 RUN /usr/local/bin/python3 -m pip uninstall -y --root-user-action=ignore pip \
     && rm -rf /usr/local/lib/python3*/ensurepip
-# Transitional: deployments written before the src/ layout still run
-# `python -m src.cleanup` and `python -m src.alerts`; compat/ runs the
-# package's modules for them (python -m looks in the working directory).
-# Remove both lines once they call toggl-cleanup and toggl-alerts.
-WORKDIR /app
-COPY compat/ ./
 USER 1000:1000
 ENTRYPOINT ["toggl-insights"]
