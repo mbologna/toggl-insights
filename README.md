@@ -2,14 +2,13 @@
 
 [![CI](https://github.com/mbologna/toggl-insights/actions/workflows/ci.yml/badge.svg)](https://github.com/mbologna/toggl-insights/actions/workflows/ci.yml)
 
-A personal time-tracking dashboard and alerting system built on top of
-[Toggl Track](https://track.toggl.com)'s Reports API. One FastAPI app serves a
-single-page dashboard (daily/weekly/monthly/yearly charts, year-over-year
-comparison, a GitHub-style activity heatmap, hour-of-day patterns, weekly
-targets, and annual goals), backed by a SQLite archive that accumulates time
-entries indefinitely — Toggl's own APIs only expose recent history on demand,
-so this project keeps its own append-only copy. A separate set of scheduled
-entrypoints sends weekly/monthly reports and a lapsed-habit nudge to [Apprise](https://github.com/caronc/apprise).
+A time-tracking dashboard and alerts for [Toggl Track](https://track.toggl.com),
+built on its Reports API. Toggl's APIs return only recent history on demand, so
+the app keeps its own append-only SQLite archive of every time entry. One
+FastAPI app serves a single-page dashboard: daily, weekly, monthly and yearly
+charts, year-over-year comparison, a GitHub-style activity heatmap, hour-of-day
+patterns, weekly targets and annual goals. Scheduled entrypoints send weekly and
+monthly reports, and a nudge when a habit lapses, through [Apprise](https://github.com/caronc/apprise).
 
 ![The Patterns tab: hours per weekday by project, and a time-of-day heatmap](docs/screenshot.png)
 
