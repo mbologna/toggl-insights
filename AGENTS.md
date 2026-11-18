@@ -17,8 +17,8 @@ Dockerfile                     # two stages: uv sync --locked into /opt/venv, th
 
 ## Conventions
 
-- Conventional Commits, header at most 72 characters. The squash-merge
-  subject is the release note: `feat`/`fix`/`perf` release, `refactor`,
+- Conventional Commits, header at most 72 characters. The commit subjects
+  that reach main are the release notes: `feat`/`fix`/`perf` release, `refactor`,
   `test`, `docs`, `ci`, `chore` don't (a dependency update to runtime files
   ships in the weekly maintenance release).
 - Releases are tags; `pyproject.toml`'s version stays `0.0.0`.
