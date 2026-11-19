@@ -1,15 +1,29 @@
 # Copier's record of this project's template answers. Don't edit by hand:
 # `copier update` (or Renovate's copier manager) reads it to apply
 # template changes.
-_commit: v1.1.2
+_commit: v1.3.0
 _src_path: https://github.com/mbologna/python-app-template.git
 author: Michele Bologna
 base_variant: slim
+build_packages: ''
+codecov: false
 coverage_fail_under: 90
 description: Toggl time tracking dashboard and trend alerts
+entrypoint: entrypoint
 forge: github
+image_uid: 1000
+image_user: ''
+license: MIT
+main_module: false
 notifications: true
+owned_files: []
 package_name: toggl_insights
+port: 8080
 project_name: toggl-insights
+releases: true
+runtime_env: ''
+runtime_packages: ''
 sample_code: false
+script_target: toggl_insights.main:serve
 smoke_cmd: python -c 'import toggl_insights.main, toggl_insights.alerts, toggl_insights.cleanup'
+writable_dirs: ''
