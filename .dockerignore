@@ -4,8 +4,8 @@
 .gitlab-ci.yml
 .venv
 tests
-__pycache__
-*.pyc
+**/__pycache__
+**/*.pyc
 .pytest_cache
 .ruff_cache
 .coverage

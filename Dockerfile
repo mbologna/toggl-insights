@@ -8,12 +8,16 @@ COPY requirements-uv.txt /tmp/
 RUN pip install --no-cache-dir --root-user-action=ignore --require-hashes -r /tmp/requirements-uv.txt
 # Install exactly what uv.lock pins, checking its hashes, rather than
 # re-resolving pyproject.toml at build time; --locked fails the build when
-# uv.lock is out of date. Bytecode is compiled here because the runtime image
-# sets PYTHONDONTWRITEBYTECODE and runs read-only.
+# uv.lock is out of date. Dependencies first, so their layer survives a change
+# to the code or the docs; then the app itself, as a regular (non-editable)
+# package. Bytecode is compiled here because the runtime image sets
+# PYTHONDONTWRITEBYTECODE and runs read-only.
 ENV UV_PROJECT_ENVIRONMENT=/opt/venv UV_PYTHON=/usr/local/bin/python3 UV_PYTHON_DOWNLOADS=never \
     UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_NO_CACHE=1
 WORKDIR /tmp/build
-COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev --no-editable --no-install-project
+COPY README.md LICENSE ./
 COPY src/ src/
 RUN uv sync --locked --no-dev --no-editable
 
@@ -27,6 +31,9 @@ COPY --from=build /opt/venv /opt/venv
 # Run-time writes go to /tmp (HOME too), so the root filesystem can be
 # read-only.
 ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
+# PORT: where the server listens. Cloud Run and most container runtimes set
+# it; 8080 otherwise.
+ENV PORT=8080
 # The base image's pip (with the packages it vendors) and ensurepip's
 # bundled pip wheel are never used at run time; removing them keeps their
 # CVEs out of the image.
@@ -40,4 +47,5 @@ RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 USER 1000:1000
+EXPOSE 8080
 ENTRYPOINT ["toggl-insights"]
