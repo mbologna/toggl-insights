@@ -3,12 +3,6 @@
 # wheels match the Python they run on.
 FROM python:3.15.2-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS build
 
-# git: apprise-notify is a git dependency. Only this stage has it: the
-# runtime stage gets the finished virtualenv. Not version-pinned: git never
-# reaches the image, and the distribution drops old versions.
-# hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends git \
-    && rm -rf /var/lib/apt/lists/*
 # uv from PyPI, hash-checked (requirements-uv.txt says why).
 COPY requirements-uv.txt /tmp/
 RUN pip install --no-cache-dir --root-user-action=ignore --require-hashes -r /tmp/requirements-uv.txt
