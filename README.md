@@ -165,7 +165,10 @@ need a single number. `description` matches the title ignoring case, emoji
 and punctuation, so `?description=morning+yoga` finds "🧘 Morning yoga!", and so
 does a part of it like `yoga`. If one title matches exactly, it wins over
 titles that only contain the query. Same-day entries are summed into one visit, so a timer
-restarted by mistake counts once. Today is excluded, because it is usually
+restarted by mistake counts once. With `mode=span` a visit instead runs from the
+day's first matching entry to start to its last one to stop, gaps included: for a
+stay tracked only at its edges, like gym preparation before and after a workout
+whose own entry has another title (`?description=gym+preparation&mode=span`). Today is excluded, because it is usually
 still in progress. `minutes` is the median visit over the last `weeks` (1–52,
 default 4). The median is used because one short or forgotten-timer day barely
 moves it. The response also carries the visit count and the mean, min and max.
