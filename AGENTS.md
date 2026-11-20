@@ -21,7 +21,6 @@ Dockerfile                     # two stages: uv sync --locked into /opt/venv, th
   that reach main are the release notes: `feat`/`fix`/`perf` release, `refactor`,
   `test`, `docs`, `ci`, `chore` don't (a dependency update to runtime files
   ships in the weekly maintenance release).
-- Releases are tags; `pyproject.toml`'s version stays `0.0.0`.
 - Coverage may not drop below `fail_under` in `pyproject.toml`; raise it
   when tests are added.
 - Dependencies: `uv add <pkg>`; uv.lock is committed and the image installs
@@ -31,6 +30,19 @@ Dockerfile                     # two stages: uv sync --locked into /opt/venv, th
   order. It never raises; check its return value when sending matters.
 - The image: non-root (uid 1000), no pip, nothing written outside `/tmp`
   or a mounted volume.
+
+## Versioning
+
+Plain SemVer: `vX.Y.Z` tags, each publishing the image as `X.Y.Z`, `X.Y` and
+`latest` on GHCR, per the [versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md).
+
+- Never create, move or delete tags, and never edit a version number to cut
+  a release: auto-release tags from the commit types (`feat` minor; `fix`,
+  `perf`, `revert` patch; `!` or a `BREAKING CHANGE:` footer major).
+- Write Conventional Commit subjects; they decide the next version.
+- `version` in `pyproject.toml` is a placeholder that stays `0.0.0`: the
+  tag is the version, and the image built from it carries it in its
+  `org.opencontainers.image.version` label.
 
 ## Template
 
