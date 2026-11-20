@@ -376,6 +376,7 @@ class TestApiSessionsTypical:
 
         assert data == {
             "description": "🧘 Yoga",
+            "mode": "sum",
             "weeks": 4,
             "since": "2026-09-26",
             "until": "2026-10-23",
@@ -386,6 +387,41 @@ class TestApiSessionsTypical:
             "min_secs": 3000,
             "max_secs": 9000,
         }
+
+    def test_span_measures_first_start_to_last_stop(self, tmp_path):
+        archive = TogglArchive(str(tmp_path / "toggl.db"))
+        today = date(2026, 10, 24)
+        archive.upsert(
+            [
+                # arrival 13:00-13:20, then the workout under another title, then 15:00-15:30
+                self._entry(1, "⏳ Gym preparation", date(2026, 10, 21), 1200, hour=13),
+                self._entry(2, "⏳ Gym preparation", date(2026, 10, 21), 1800, hour=15),
+                # one edge only: the span is that entry
+                self._entry(3, "⏳ Gym preparation", date(2026, 10, 19), 600, hour=9),
+                self._entry(4, "🏋️ Traditional Strength Training", date(2026, 10, 21), 4800, hour=13),
+            ]
+        )
+
+        data = main._build_typical_session(archive, "gym preparation", 4, today, mode="span")
+
+        assert data["mode"] == "span"
+        assert data["visits"] == 2
+        assert data["max_secs"] == 9000  # 13:00 to 15:30
+        assert data["min_secs"] == 600
+        assert main._build_typical_session(archive, "gym preparation", 4, today)["max_secs"] == 3000
+
+    def test_span_mode_over_http(self, client):
+        yesterday = date.today() - timedelta(days=1)
+        TogglArchive(main._DB_PATH).upsert(
+            [
+                self._entry(1, "Gym preparation", yesterday, 600, hour=9),
+                self._entry(2, "Gym preparation", yesterday, 600, hour=11),
+            ]
+        )
+        resp = client.get("/api/sessions/typical", params={"description": "gym preparation", "mode": "span"})
+        assert resp.status_code == 200
+        assert resp.json()["minutes"] == 130
+        assert client.get("/api/sessions/typical", params={"description": "gym", "mode": "both"}).status_code == 422
 
     def test_window_start_is_inclusive(self, tmp_path):
         archive = TogglArchive(str(tmp_path / "toggl.db"))

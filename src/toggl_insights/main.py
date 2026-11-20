@@ -6,7 +6,7 @@ import os
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -22,6 +22,7 @@ from toggl_insights.toggl import (
     recurring_descriptions,
     row_of,
     session_stats,
+    visit_span_stats,
     visit_stats,
 )
 
@@ -452,8 +453,14 @@ def api_sessions() -> dict:
     return data
 
 
-def _build_typical_session(archive: TogglArchive, query: str, weeks: int, today: date) -> dict:
+def _build_typical_session(
+    archive: TogglArchive, query: str, weeks: int, today: date, mode: Literal["sum", "span"] = "sum"
+) -> dict:
     """Typical length of one description's visits over the last `weeks` full weeks.
+
+    A visit is one local day. `mode="sum"` adds up that day's entries (a timer
+    split by mistake still counts once); `mode="span"` measures from the first
+    entry's start to the last one's stop, for a stay tracked only at its edges.
 
     `query` is matched by match_descriptions (case, emoji and punctuation
     ignored), so callers that can't easily send emoji (an iOS Shortcut) can pass
@@ -476,9 +483,11 @@ def _build_typical_session(archive: TogglArchive, query: str, weeks: int, today:
         )
 
     (description,) = matches
-    stats = visit_stats([e for e in entries if e["description"] == description])
+    matching = [e for e in entries if e["description"] == description]
+    stats = visit_span_stats(matching) if mode == "span" else visit_stats(matching)
     return {
         "description": description,
+        "mode": mode,
         "weeks": weeks,
         "since": since.isoformat(),
         "until": (today - timedelta(days=1)).isoformat(),
@@ -495,8 +504,9 @@ def _build_typical_session(archive: TogglArchive, query: str, weeks: int, today:
 def api_sessions_typical(
     description: Annotated[str, Query(min_length=1)],
     weeks: Annotated[int, Query(ge=1, le=52)] = 4,
+    mode: Literal["sum", "span"] = "sum",
 ) -> dict:
-    return _build_typical_session(TogglArchive(_DB_PATH), description, weeks, date.today())
+    return _build_typical_session(TogglArchive(_DB_PATH), description, weeks, date.today(), mode)
 
 
 @app.get("/", response_class=FileResponse)

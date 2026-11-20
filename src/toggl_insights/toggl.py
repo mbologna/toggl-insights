@@ -797,6 +797,23 @@ def visit_stats(entries: list[dict]) -> dict:
     return session_stats([{"duration": total} for total in totals.values()])
 
 
+def visit_span_stats(entries: list[dict]) -> dict:
+    """session_stats over visits measured end to end: a visit runs from the first
+    of the given entries to start on one local day to the last one to stop, gaps
+    included. For a stay that is tracked only at its edges, like the gym
+    preparation before and after a workout whose own entry carries another title."""
+    spans: dict[date, tuple[datetime, datetime]] = {}
+    for entry in entries:
+        if entry.get("duration", 0) <= 0:
+            continue
+        start = datetime.fromisoformat(entry["start"].replace("Z", "+00:00"))
+        stop = start + timedelta(seconds=entry["duration"])
+        day = TogglReportsClient._entry_date(entry)
+        first, last = spans.get(day, (start, stop))
+        spans[day] = (min(first, start), max(last, stop))
+    return session_stats([{"duration": int((last - first).total_seconds())} for first, last in spans.values()])
+
+
 def format_duration(seconds: int) -> str:
     """Format seconds as "1h 05m" (or "45m" under an hour)."""
     hours, minutes = divmod(round(seconds / 60), 60)
