@@ -307,3 +307,12 @@ history check runs (on the free tier's quota it can legitimately take hours).
 GitHub Actions builds the image and publishes it to
 `ghcr.io/mbologna/toggl-insights` (linux/amd64 and linux/arm64). It runs well
 as a Deployment for the dashboard plus one CronJob per alert entrypoint.
+
+## Versioning
+
+Releases follow SemVer: [auto-release](https://github.com/mbologna/auto-release)
+tags `vX.Y.Z` on Mondays from the Conventional Commit types merged since the
+last tag (`feat` minor; `fix`, `perf`, `revert` patch; a breaking change
+major), and each tag publishes the image as `X.Y.Z`, `X.Y` and `latest`; the
+`version` in `pyproject.toml` stays `0.0.0`. See the
+[versioning standard](https://github.com/mbologna/.github/blob/main/VERSIONING.md).
