@@ -505,7 +505,8 @@ def dashboard() -> FileResponse:
 
 
 def serve() -> None:
-    """Console script toggl-insights, the image's entry point: the dashboard on port 8080."""
+    """Console script toggl-insights, the image's entry point: the dashboard on $PORT (8080)."""
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8080)  # nosec B104: a container port, reached through the Service
+    port = int(os.environ.get("PORT", "8080"))
+    uvicorn.run(app, host="0.0.0.0", port=port)  # nosec B104: a container port, reached through the Service

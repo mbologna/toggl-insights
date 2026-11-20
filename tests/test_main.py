@@ -436,3 +436,14 @@ class TestDashboard:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/html")
         assert "Toggl Insights" in resp.text
+
+
+class TestServe:
+    @pytest.mark.parametrize(("env", "port"), [({}, 8080), ({"PORT": "9090"}, 9090)])
+    def test_listens_on_port(self, monkeypatch, env, port):
+        monkeypatch.delenv("PORT", raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        with patch("uvicorn.run") as run:
+            main.serve()
+        assert run.call_args.kwargs["port"] == port
