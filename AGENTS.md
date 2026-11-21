@@ -49,4 +49,4 @@ Plain SemVer: `vX.Y.Z` tags, each publishing the image as `X.Y.Z`, `X.Y` and
 The skeleton comes from https://github.com/mbologna/python-app-template
 (`.copier-answers.yml`). Renovate's copier manager opens a pull request
 for each template release; resolve conflicts in favour of this project's
-code. By hand: `uvx copier update --trust`.
+code. By hand: `uvx copier update`, then `uv lock` if dependencies changed.
