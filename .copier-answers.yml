@@ -27,3 +27,5 @@ sample_code: false
 script_target: toggl_insights.main:serve
 smoke_cmd: python -c 'import toggl_insights.main, toggl_insights.alerts, toggl_insights.cleanup'
 writable_dirs: ''
+
+#copier updated
