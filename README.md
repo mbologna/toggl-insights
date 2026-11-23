@@ -311,6 +311,17 @@ GitHub Actions builds the image and publishes it to
 `ghcr.io/mbologna/toggl-insights` (linux/amd64 and linux/arm64). It runs well
 as a Deployment for the dashboard plus one CronJob per alert entrypoint.
 
+## Why not an existing tool
+
+- Toggl's own reports, Goals (up to 4 in Toggl 2.0) and long-timer emails keep
+  no full local archive. They have no year-over-year view, heatmap or
+  hour-of-day charts, no nudge when a routine lapses, no cleanup of stub or
+  once-a-day entries, and no delivery through Apprise.
+- [solidtime](https://www.solidtime.io/) and [Kimai](https://www.kimai.org/)
+  are time trackers. They would replace Toggl itself, not this dashboard.
+
+Checked 2026-11-23.
+
 ## Versioning
 
 Releases follow SemVer: [auto-release](https://github.com/mbologna/auto-release)
