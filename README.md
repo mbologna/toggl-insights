@@ -70,7 +70,7 @@ Projects are discovered dynamically from Toggl (`GET /me/projects`, cached 24h)
 |---|---|---|---|---|
 | `TOGGL_API_TOKEN` | yes | — | all | Toggl API token (Profile → API Token) |
 | `TOGGL_WORKSPACE_ID` | yes | — | all | Numeric Toggl workspace ID |
-| `APPRISE_URL` | yes (alerts, scheduled cleanup) | — | alerts, cleanup | Apprise notify endpoint. Several space-separated URLs are tried in order until one delivers |
+| `APPRISE_URL` | yes (alerts, scheduled cleanup) | — | alerts, cleanup | Apprise notify endpoint. Several space-separated URLs are tried in order, each retried once, until one delivers |
 | `TOGGL_DB_PATH` | no | `/data/toggl.db` | all | SQLite archive path |
 | `TOGGL_HISTORY_START_DATE` | no | `2006-01-01` | dashboard | How far back the first full-history check reaches |
 | `TOGGL_DAILY_TARGET_HOURS` | no | — | dashboard | Daily hours target shown on the Overview tab |

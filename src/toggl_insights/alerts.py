@@ -11,10 +11,11 @@ import json
 import logging
 import os
 import sys
+import urllib.parse
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from apprise_notify import notify
+import apprise
 from dotenv import load_dotenv
 
 from toggl_insights.toggl import (
@@ -131,6 +132,40 @@ def _load_per_project_thresholds() -> dict[str, float]:
 # because the path to a second Apprise server may cross clusters over a
 # Tailscale link that goes cold between infrequent alert runs.
 _APPRISE_TIMEOUT = float(os.environ.get("APPRISE_TIMEOUT", "15"))
+# Seconds before the one retry of an Apprise URL.
+_APPRISE_RETRY_WAIT_SECONDS = 1
+
+
+def _apprise_api_url(url: str, timeout: float) -> str:
+    """The apprise library's URL for an Apprise API endpoint, http(s)://host:port/notify/<key>.
+
+    JSON to /notify/<key> (version=1), as Apprise API expects, with one retry
+    and `timeout` for both the connect and each read. Any query on the URL is
+    dropped."""
+    parsed = urllib.parse.urlsplit(url)
+    scheme = "apprises" if parsed.scheme == "https" else "apprise"
+    prefix, _, key = parsed.path.rpartition("/notify/")
+    path = f"{prefix.strip('/')}/{key}".lstrip("/")
+    return (
+        f"{scheme}://{parsed.netloc}/{path}?method=json&version=1"
+        f"&retry=1&wait={_APPRISE_RETRY_WAIT_SECONDS}&cto={timeout:g}&rto={timeout:g}"
+    )
+
+
+def _notify(apprise_url: str, title: str, body: str) -> bool:
+    """Send one info notification and return whether it was delivered.
+
+    apprise_url holds one Apprise API URL or several separated by whitespace.
+    Each is its own apprise priority group, so they are tried in order: the
+    first that delivers wins, and each is retried once before the next. No URL
+    returns False. The body goes out without a format, as plain text. apprise
+    logs failures; it never raises."""
+    notifier = apprise.Apprise()
+    for priority, url in enumerate(apprise_url.split(), start=1):
+        notifier.add(_apprise_api_url(url, _APPRISE_TIMEOUT), tag=f"{priority}:alert")
+    if not len(notifier):
+        return False
+    return bool(notifier.notify(title=title, body=body, notify_type="info", tag="alert"))
 
 
 def _get_client_and_archive() -> tuple[TogglReportsClient, TogglArchive]:
@@ -163,9 +198,9 @@ def _send_alert(apprise_url: str, title: str, lines: list[str]) -> bool:
     if _is_dry_run():
         logger.info("DRY RUN — would send '%s':\n%s", title, "\n".join(lines))
         return True  # treat as success so cooldowns are still updated
-    # notify tries each URL in APPRISE_URL in order (one retry on a network
-    # error or HTTP 5xx) and never raises; it logs failures to stderr.
-    if notify(apprise_url, title, "\n".join(lines), timeout=_APPRISE_TIMEOUT):
+    # _notify tries each URL in APPRISE_URL in order (each retried once) and
+    # never raises; apprise logs the failures.
+    if _notify(apprise_url, title, "\n".join(lines)):
         logger.info("Alert sent successfully.")
         return True
     logger.error("Failed to send Apprise alert %r", title)

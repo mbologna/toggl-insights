@@ -25,9 +25,11 @@ Dockerfile                     # two stages: uv sync --locked into /opt/venv, th
   when tests are added.
 - Dependencies: `uv add <pkg>`; uv.lock is committed and the image installs
   it with `--locked`. `exclude-newer` keeps releases younger than 7 days out.
-- Notifications go through `apprise_notify.notify()` with the `APPRISE_URL`
-  environment variable: one URL or several space-separated ones, tried in
-  order. It never raises; check its return value when sending matters.
+- Notifications go through `alerts._send_alert()` (the apprise library) with
+  the `APPRISE_URL` environment variable: one URL or several space-separated
+  ones, each its own priority group, tried in order and retried once before
+  the next. It returns False rather than raising; check it when sending
+  matters.
 - The image: non-root (uid 1000), no pip, nothing written outside `/tmp`
   or a mounted volume.
 

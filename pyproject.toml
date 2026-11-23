@@ -13,7 +13,7 @@ authors = [{ name = "Michele Bologna" }]
 # a person moves this floor with the next minor.
 requires-python = ">=3.15"
 dependencies = [
-    "apprise-notify>=1.2.0",
+    "apprise>=2.2.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.32.0",
     "requests>=2.33.1",
@@ -48,9 +48,6 @@ required-version = ">=0.12.12"
 # time to be caught and yanked before it lands in uv.lock. For an urgent
 # fix, add `<name> = false` to exclude-newer-package and run `uv lock`.
 exclude-newer = "7 days"
-# apprise-notify is my own package on PyPI: exempt, so a fix released there
-# is picked up at once.
-exclude-newer-package = { apprise-notify = false }
 
 [tool.ruff]
 line-length = 120
