@@ -1,19 +1,21 @@
 """Unit tests for alerts.py pure-function helpers."""
 
-import io
+import http.server
 import json
 import os
 import subprocess
 import sys
-import urllib.error
+import threading
+import time
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
-import apprise_notify
 import pytest
 
+from toggl_insights import alerts
 from toggl_insights.alerts import (
     _alert_on_empty_projects,
+    _apprise_api_url,
     _change,
     _get_client_and_archive,
     _hours_for_month,
@@ -52,63 +54,100 @@ def _recorder(sent: list[tuple[str, list[str]]]):
 # ---------------------------------------------------------------------------
 
 
-class _AppriseServer:
-    """Stands in for urllib's urlopen inside apprise_notify: records each URL
-    and payload, and refuses the connection for the URLs in `down`."""
+class _StubApprise:
+    """A local Apprise API stand-in answering every POST with one status (after
+    `delay` seconds); records the requests."""
 
-    class _Response(io.BytesIO):
-        status = 200
+    def __init__(self, status, delay=0.0):
+        calls = self.calls = []
 
-    def __init__(self, down=()):
-        self.down = set(down)
-        self.calls: list[tuple[str, dict]] = []
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("content-length", 0))
+                calls.append((self.path, self.headers.get("content-type"), json.loads(self.rfile.read(length))))
+                time.sleep(delay)
+                self.send_response(status)
+                self.end_headers()
 
-    def __call__(self, req, timeout):
-        self.calls.append((req.full_url, json.loads(req.data)))
-        self.timeout = timeout
-        if req.full_url in self.down:
-            raise urllib.error.URLError("connection refused")
-        return self._Response(b"")
+            def log_message(self, *args):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}/notify/toggl"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
 
 
 @pytest.fixture
-def apprise_server(monkeypatch):
-    """Patch apprise_notify's network call; tests set .down to fail URLs."""
-    server = _AppriseServer()
-    monkeypatch.setattr(apprise_notify, "RETRY_DELAY", 0)
-    monkeypatch.setattr(apprise_notify.urllib.request, "urlopen", server)
-    return server
+def apprise_stub(monkeypatch):
+    """Starts _StubApprise servers; no wait before a retry, and no dry run."""
+    monkeypatch.setattr(alerts, "_APPRISE_RETRY_WAIT_SECONDS", 0)
+    monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
+    servers = []
+
+    def start(status, delay=0.0):
+        servers.append(_StubApprise(status, delay))
+        return servers[-1]
+
+    yield start
+    for server in servers:
+        server.close()
 
 
 class TestSendAlert:
-    _URL = "http://apprise.local/notify/x"
-
-    def test_dry_run_short_circuits(self, monkeypatch, apprise_server):
+    def test_dry_run_short_circuits(self, monkeypatch, apprise_stub):
+        ok = apprise_stub(200)
         monkeypatch.setenv("ALERT_DRY_RUN", "true")
-        assert _send_alert(self._URL, "t", ["a", "b"]) is True
-        assert apprise_server.calls == []
+        assert _send_alert(ok.url, "t", ["a", "b"]) is True
+        assert ok.calls == []
 
-    def test_success_uses_generous_timeout(self, monkeypatch, apprise_server):
-        monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
-        assert _send_alert(self._URL, "t", ["line", "two"]) is True
-        assert apprise_server.calls == [(self._URL, {"title": "t", "body": "line\ntwo", "type": "info"})]
+    def test_sends_an_info_notification_as_json_to_the_key(self, apprise_stub):
+        ok = apprise_stub(200)
+        assert _send_alert(ok.url, "t", ["line", "two"]) is True
+        assert ok.calls == [("/notify/toggl", "application/json", {"title": "t", "body": "line\ntwo", "type": "info"})]
+
+    def test_timeout_is_generous_and_covers_the_connect(self):
         # Must tolerate a cold cross-cluster WireGuard connect (was 3.05s).
-        assert apprise_server.timeout >= 10
+        assert alerts._APPRISE_TIMEOUT >= 10
+        assert _apprise_api_url("http://apprise:8000/notify/toggl", 15.0) == (
+            "apprise://apprise:8000/toggl?method=json&version=1&retry=1&wait=1&cto=15&rto=15"
+        )
+        assert _apprise_api_url("https://example.org/apprise/notify/k?x=y", 2.5) == (
+            "apprises://example.org/apprise/k?method=json&version=1&retry=1&wait=1&cto=2.5&rto=2.5"
+        )
 
-    def test_connection_error_returns_false(self, monkeypatch, apprise_server):
-        monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
-        apprise_server.down = {self._URL}
-        assert _send_alert(self._URL, "t", ["line"]) is False
-        # One retry on a network error, then give up.
-        assert [url for url, _ in apprise_server.calls] == [self._URL, self._URL]
+    def test_a_reply_slower_than_the_timeout_is_not_delivered(self, monkeypatch, apprise_stub):
+        monkeypatch.setattr(alerts, "_APPRISE_TIMEOUT", 0.2)
+        slow = apprise_stub(200, delay=1.0)
+        assert _send_alert(slow.url, "t", ["line"]) is False
 
-    def test_url_list_fails_over_in_order(self, monkeypatch, apprise_server):
+    def test_server_error_is_retried_once_then_returns_false(self, apprise_stub):
+        down = apprise_stub(500)
+        assert _send_alert(down.url, "t", ["line"]) is False
+        assert len(down.calls) == 2
+
+    def test_no_configuration_204_counts_as_not_delivered(self, apprise_stub):
+        empty, ok = apprise_stub(204), apprise_stub(200)
+        assert _send_alert(f"{empty.url} {ok.url}", "t", ["line"]) is True
+        assert len(ok.calls) == 1
+
+    def test_url_list_fails_over_in_order(self, apprise_stub):
         """APPRISE_URL may list several URLs: the first is retried once, then the next delivers."""
-        monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
-        own, other, third = "http://own/notify/x", "http://other/notify/x", "http://third/notify/x"
-        apprise_server.down = {own}
-        assert _send_alert(f"{own} {other} {third}", "t", ["line"]) is True
-        assert [url for url, _ in apprise_server.calls] == [own, own, other]
+        own, other, third = apprise_stub(500), apprise_stub(200), apprise_stub(200)
+        assert _send_alert(f"{own.url} {other.url} {third.url}", "t", ["line"]) is True
+        assert (len(own.calls), len(other.calls), len(third.calls)) == (2, 1, 0)
+
+    def test_every_url_failing_returns_false(self, apprise_stub):
+        a, b = apprise_stub(500), apprise_stub(500)
+        assert _send_alert(f"{a.url} {b.url}", "t", ["line"]) is False
+        assert (len(a.calls), len(b.calls)) == (2, 2)
+
+    def test_no_url_returns_false(self, apprise_stub):
+        assert _send_alert("", "t", ["line"]) is False
 
 
 # ---------------------------------------------------------------------------
@@ -168,22 +207,21 @@ class TestAlertOnEmptyProjects:
 
         mock_send.assert_not_called()
 
-    def test_sends_actual_payload(self, tmp_path, monkeypatch, apprise_server):
-        monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
+    def test_sends_actual_payload(self, tmp_path, apprise_stub):
+        ok = apprise_stub(200)
         archive = TogglArchive(str(tmp_path / "toggl.db"))
 
-        _alert_on_empty_projects(archive, "http://apprise/notify")
+        _alert_on_empty_projects(archive, ok.url)
 
-        ((_, payload),) = apprise_server.calls
+        ((_, _, payload),) = ok.calls
         assert payload["title"] == "Toggl Insights: alerting is down"
         assert archive.is_on_cooldown("no_projects", 0, cooldown_days=5)
 
-    def test_undelivered_alert_leaves_no_cooldown(self, tmp_path, monkeypatch, apprise_server):
-        monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
+    def test_undelivered_alert_leaves_no_cooldown(self, tmp_path, apprise_stub):
+        down = apprise_stub(500)
         archive = TogglArchive(str(tmp_path / "toggl.db"))
-        apprise_server.down = {"http://apprise/notify"}
 
-        _alert_on_empty_projects(archive, "http://apprise/notify")
+        _alert_on_empty_projects(archive, down.url)
 
         assert not archive.is_on_cooldown("no_projects", 0, cooldown_days=5)
 
